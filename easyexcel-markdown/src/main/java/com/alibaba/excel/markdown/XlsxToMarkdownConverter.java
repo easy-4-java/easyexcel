@@ -11,11 +11,13 @@ import java.io.PushbackInputStream;
 import java.io.Reader;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
 
 import org.apache.commons.csv.CSVFormat;
@@ -49,6 +51,8 @@ public final class XlsxToMarkdownConverter {
     private static final byte[] OLE2_MAGIC = {(byte)0xD0, (byte)0xCF, 0x11, (byte)0xE0};
     private static final String CSV_SUFFIX = ".csv";
     private static final char UTF8_BOM = '\uFEFF';
+    private static final String IMAGE_PLACEHOLDER = "[image]";
+    private static final String CELL_KEY_SEPARATOR = ":";
 
     private XlsxToMarkdownConverter() {}
 
@@ -114,6 +118,14 @@ public final class XlsxToMarkdownConverter {
         // TreeMap keeps the deterministic workbook order by sheet number.
         final Map<Integer, SheetTable> sheetMap = new TreeMap<>();
         final Map<Integer, List<int[]>> mergeMap = new HashMap<>(16);
+        Map<Integer, Set<String>> pictureAnchors = Collections.emptyMap();
+        if (file != null && isZipFile(file)) {
+            try {
+                pictureAnchors = DrawingAnchorScanner.scanPictureAnchors(file);
+            } catch (IOException e) {
+                throw new ExcelAnalysisException("Read picture anchors failure", e);
+            }
+        }
         ExcelReaderBuilder builder = file != null ? EasyExcel.read(file) : EasyExcel.read(inputStream);
         try (ExcelReader reader = builder.headRowNumber(0)
             .extraRead(CellExtraTypeEnum.MERGE)
@@ -132,10 +144,40 @@ public final class XlsxToMarkdownConverter {
         for (Map.Entry<Integer, SheetTable> entry : sheetMap.entrySet()) {
             SheetTable table = entry.getValue();
             applyMergedRegions(table, mergeMap.get(entry.getKey()));
+            applyImagePlaceholders(table, pictureAnchors.get(entry.getKey()));
             promoteFirstRowToHeader(table);
             tables.add(table);
         }
         return tables;
+    }
+
+    /**
+     * Mark the anchor cell of every picture with a placeholder, keeping any value the cell
+     * already carries. Rows and columns that only exist because of a picture are created.
+     */
+    private static void applyImagePlaceholders(SheetTable table, Set<String> anchors) {
+        if (anchors == null || anchors.isEmpty()) {
+            return;
+        }
+        int maxRow = -1;
+        for (String anchor : anchors) {
+            maxRow = Math.max(maxRow, Integer.parseInt(anchor.substring(0, anchor.indexOf(CELL_KEY_SEPARATOR))));
+        }
+        while (table.rows.size() <= maxRow) {
+            table.rows.add(new ArrayList<>());
+        }
+        for (String anchor : anchors) {
+            int separator = anchor.indexOf(CELL_KEY_SEPARATOR);
+            int rowIndex = Integer.parseInt(anchor.substring(0, separator));
+            int columnIndex = Integer.parseInt(anchor.substring(separator + CELL_KEY_SEPARATOR.length()));
+            List<String> row = table.rows.get(rowIndex);
+            for (int columnIndexToPad = row.size(); columnIndexToPad <= columnIndex; columnIndexToPad++) {
+                row.add("");
+            }
+            if (row.get(columnIndex).isEmpty()) {
+                row.set(columnIndex, IMAGE_PLACEHOLDER);
+            }
+        }
     }
 
     private static SheetTable loadCsv(File file) {
@@ -271,6 +313,22 @@ public final class XlsxToMarkdownConverter {
             }
         }
         return true;
+    }
+
+    /**
+     * Only ZIP based workbooks (XLSX) can carry drawings the scanner understands, legacy XLS is
+     * skipped on purpose.
+     */
+    private static boolean isZipFile(File file) {
+        byte[] head = new byte[ZIP_MAGIC.length];
+        int read = 0;
+        try (InputStream in = Files.newInputStream(file.toPath())) {
+            while (read < head.length && (read += in.read(head, read, head.length - read)) != -1) {
+            }
+        } catch (IOException e) {
+            return false;
+        }
+        return startsWith(head, ZIP_MAGIC);
     }
 
     /**
