@@ -130,6 +130,7 @@ public final class XlsxToMarkdownConverter {
         }
         ExcelReaderBuilder builder = file != null ? EasyExcel.read(file) : EasyExcel.read(inputStream);
         try (ExcelReader reader = builder.headRowNumber(0)
+            .ignoreEmptyRow(false)
             .extraRead(CellExtraTypeEnum.MERGE)
             .extraRead(CellExtraTypeEnum.HYPERLINK)
             .extraRead(CellExtraTypeEnum.COMMENT)
@@ -152,6 +153,7 @@ public final class XlsxToMarkdownConverter {
             applyMergedRegions(table, mergeMap.get(entry.getKey()));
             applyCellExtras(table, hyperlinkMap.get(entry.getKey()), commentMap.get(entry.getKey()));
             applyImagePlaceholders(table, pictureAnchors.get(entry.getKey()));
+            trimTrailingEmptyRows(table);
             promoteFirstRowToHeader(table);
             tables.add(table);
         }
@@ -329,6 +331,25 @@ public final class XlsxToMarkdownConverter {
         String folded = comment.replace("\r\n", " ").replace('\r', ' ').replace('\n', ' ').trim();
         String cell = value == null ? "" : value;
         return cell.isEmpty() ? "<!-- " + folded + " -->" : cell + " <!-- " + folded + " -->";
+    }
+
+    /**
+     * Blank rows in the middle of the data are kept, but the styled-empty rows that trail real
+     * content in most workbooks would only add noise, so they are cut.
+     */
+    private static void trimTrailingEmptyRows(SheetTable table) {
+        while (!table.rows.isEmpty() && isBlankRow(table.rows.get(table.rows.size() - 1))) {
+            table.rows.remove(table.rows.size() - 1);
+        }
+    }
+
+    private static boolean isBlankRow(List<String> row) {
+        for (String value : row) {
+            if (value != null && !value.isEmpty()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static void promoteFirstRowToHeader(SheetTable table) {

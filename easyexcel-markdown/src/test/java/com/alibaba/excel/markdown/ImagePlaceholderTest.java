@@ -65,7 +65,7 @@ public class ImagePlaceholderTest {
         SheetDocument document = XlsxToMarkdownConverter.toStructured(convertToFile(pictureWorkbook()));
 
         List<List<String>> rows = document.sheets.get(0).rows;
-        assertThat(rows.get(0)).containsExactly("[image]");
+        assertThat(rows.get(0)).containsExactly("[image]", "");
     }
 
     @Test
