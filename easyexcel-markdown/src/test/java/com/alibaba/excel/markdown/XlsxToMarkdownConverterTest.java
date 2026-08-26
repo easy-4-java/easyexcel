@@ -119,9 +119,10 @@ public class XlsxToMarkdownConverterTest {
 
         SheetTable alpha = document.sheets.get(0);
         assertThat(alpha.sheetName).isEqualTo("Alpha");
-        assertThat(alpha.headers).containsExactly(Arrays.asList("Name", "Age"));
+        // the grid is normalized to a rectangle before extra processing
+        assertThat(alpha.headers).containsExactly(Arrays.asList("Name", "Age", ""));
         assertThat(alpha.rows).containsExactly(
-            Arrays.asList("Zhang San", "20"),
+            Arrays.asList("Zhang San", "20", ""),
             Arrays.asList("only-a", "", "c"));
 
         SheetTable beta = document.sheets.get(1);

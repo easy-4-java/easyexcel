@@ -118,6 +118,8 @@ public final class XlsxToMarkdownConverter {
         // TreeMap keeps the deterministic workbook order by sheet number.
         final Map<Integer, SheetTable> sheetMap = new TreeMap<>();
         final Map<Integer, List<int[]>> mergeMap = new HashMap<>(16);
+        final Map<Integer, Map<String, String>> hyperlinkMap = new HashMap<>(16);
+        final Map<Integer, Map<String, String>> commentMap = new HashMap<>(16);
         Map<Integer, Set<String>> pictureAnchors = Collections.emptyMap();
         if (file != null && isZipFile(file)) {
             try {
@@ -129,7 +131,10 @@ public final class XlsxToMarkdownConverter {
         ExcelReaderBuilder builder = file != null ? EasyExcel.read(file) : EasyExcel.read(inputStream);
         try (ExcelReader reader = builder.headRowNumber(0)
             .extraRead(CellExtraTypeEnum.MERGE)
-            .registerReadListener(new MarkdownReadListener(sheetMap, mergeMap))
+            .extraRead(CellExtraTypeEnum.HYPERLINK)
+            .extraRead(CellExtraTypeEnum.COMMENT)
+            .registerReadListener(
+                new MarkdownReadListener(sheetMap, mergeMap, hyperlinkMap, commentMap))
             .build()) {
             // Pre register every sheet so that sheets without any row are still present.
             for (ReadSheet readSheet : reader.excelExecutor().sheetList()) {
@@ -143,7 +148,9 @@ public final class XlsxToMarkdownConverter {
         List<SheetTable> tables = new ArrayList<>();
         for (Map.Entry<Integer, SheetTable> entry : sheetMap.entrySet()) {
             SheetTable table = entry.getValue();
+            normalizeWidth(table);
             applyMergedRegions(table, mergeMap.get(entry.getKey()));
+            applyCellExtras(table, hyperlinkMap.get(entry.getKey()), commentMap.get(entry.getKey()));
             applyImagePlaceholders(table, pictureAnchors.get(entry.getKey()));
             promoteFirstRowToHeader(table);
             tables.add(table);
@@ -232,11 +239,11 @@ public final class XlsxToMarkdownConverter {
     }
 
     /**
-     * Fill every cell of a merged region with the value of its top-left cell, so the flat
-     * Markdown table still shows the merged content on each covered position.
+     * Pad every row to the widest row so that all later passes and the Markdown rendering see
+     * a rectangular grid.
      */
-    private static void applyMergedRegions(SheetTable table, List<int[]> regions) {
-        if (regions == null || regions.isEmpty() || table.rows.isEmpty()) {
+    private static void normalizeWidth(SheetTable table) {
+        if (table.rows.isEmpty()) {
             return;
         }
         int width = 0;
@@ -247,6 +254,20 @@ public final class XlsxToMarkdownConverter {
             for (int columnIndex = row.size(); columnIndex < width; columnIndex++) {
                 row.add("");
             }
+        }
+    }
+
+    /**
+     * Fill every cell of a merged region with the value of its top-left cell, so the flat
+     * Markdown table still shows the merged content on each covered position.
+     */
+    private static void applyMergedRegions(SheetTable table, List<int[]> regions) {
+        if (regions == null || regions.isEmpty() || table.rows.isEmpty()) {
+            return;
+        }
+        int width = 0;
+        for (List<String> row : table.rows) {
+            width = Math.max(width, row.size());
         }
         for (int[] region : regions) {
             int firstRow = region[0];
@@ -267,6 +288,47 @@ public final class XlsxToMarkdownConverter {
                 }
             }
         }
+    }
+
+    /**
+     * Wrap hyperlinked cells as Markdown links and append cell comments after the value.
+     */
+    private static void applyCellExtras(SheetTable table, Map<String, String> hyperlinks,
+        Map<String, String> comments) {
+        boolean noHyperlinks = hyperlinks == null || hyperlinks.isEmpty();
+        boolean noComments = comments == null || comments.isEmpty();
+        if (noHyperlinks && noComments) {
+            return;
+        }
+        for (int rowIndex = 0; rowIndex < table.rows.size(); rowIndex++) {
+            List<String> row = table.rows.get(rowIndex);
+            for (int columnIndex = 0; columnIndex < row.size(); columnIndex++) {
+                if (!noHyperlinks) {
+                    String url = hyperlinks.get(rowIndex + CELL_KEY_SEPARATOR + columnIndex);
+                    if (url != null) {
+                        row.set(columnIndex, markdownLink(row.get(columnIndex), url));
+                    }
+                }
+                if (!noComments) {
+                    String comment = comments.get(rowIndex + CELL_KEY_SEPARATOR + columnIndex);
+                    if (comment != null) {
+                        row.set(columnIndex, appendComment(row.get(columnIndex), comment));
+                    }
+                }
+            }
+        }
+    }
+
+    static String markdownLink(String text, String url) {
+        String safeText = text == null || text.isEmpty() ? url : text;
+        boolean needsAngleBrackets = url.contains(" ") || url.contains("(") || url.contains(")");
+        return "[" + safeText + "](" + (needsAngleBrackets ? "<" + url + ">" : url) + ")";
+    }
+
+    static String appendComment(String value, String comment) {
+        String folded = comment.replace("\r\n", " ").replace('\r', ' ').replace('\n', ' ').trim();
+        String cell = value == null ? "" : value;
+        return cell.isEmpty() ? "<!-- " + folded + " -->" : cell + " <!-- " + folded + " -->";
     }
 
     private static void promoteFirstRowToHeader(SheetTable table) {
@@ -357,16 +419,21 @@ public final class XlsxToMarkdownConverter {
     }
 
     /**
-     * Collect one {@link SheetTable} per sheet number and every merged region reported by the
-     * {@code extra} callback.
+     * Collect one {@link SheetTable} per sheet number plus every merged region, hyperlink and
+     * comment reported by the {@code extra} callback.
      */
     private static final class MarkdownReadListener implements ReadListener<Map<Integer, String>> {
         private final Map<Integer, SheetTable> sheetMap;
         private final Map<Integer, List<int[]>> mergeMap;
+        private final Map<Integer, Map<String, String>> hyperlinkMap;
+        private final Map<Integer, Map<String, String>> commentMap;
 
-        MarkdownReadListener(Map<Integer, SheetTable> sheetMap, Map<Integer, List<int[]>> mergeMap) {
+        MarkdownReadListener(Map<Integer, SheetTable> sheetMap, Map<Integer, List<int[]>> mergeMap,
+            Map<Integer, Map<String, String>> hyperlinkMap, Map<Integer, Map<String, String>> commentMap) {
             this.sheetMap = sheetMap;
             this.mergeMap = mergeMap;
+            this.hyperlinkMap = hyperlinkMap;
+            this.commentMap = commentMap;
         }
 
         @Override
@@ -393,6 +460,13 @@ public final class XlsxToMarkdownConverter {
         @Override
         public void extra(CellExtra extra, AnalysisContext context) {
             if (extra.getType() != CellExtraTypeEnum.MERGE) {
+                if (extra.getType() == CellExtraTypeEnum.HYPERLINK) {
+                    putByCell(hyperlinkMap, context.readSheetHolder().getSheetNo(), extra.getRowIndex(),
+                        extra.getColumnIndex(), extra.getText());
+                } else if (extra.getType() == CellExtraTypeEnum.COMMENT) {
+                    putByCell(commentMap, context.readSheetHolder().getSheetNo(), extra.getRowIndex(),
+                        extra.getColumnIndex(), extra.getText());
+                }
                 return;
             }
             List<int[]> regions = mergeMap.get(context.readSheetHolder().getSheetNo());
@@ -402,6 +476,16 @@ public final class XlsxToMarkdownConverter {
             }
             regions.add(new int[] {extra.getFirstRowIndex(), extra.getLastRowIndex(),
                 extra.getFirstColumnIndex(), extra.getLastColumnIndex()});
+        }
+
+        private static void putByCell(Map<Integer, Map<String, String>> map, Integer sheetNo,
+            Integer rowIndex, Integer columnIndex, String value) {
+            Map<String, String> cells = map.get(sheetNo);
+            if (cells == null) {
+                cells = new HashMap<>(16);
+                map.put(sheetNo, cells);
+            }
+            cells.put(rowIndex + CELL_KEY_SEPARATOR + columnIndex, value);
         }
 
         @Override
