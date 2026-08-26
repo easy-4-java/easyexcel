@@ -1,5 +1,7 @@
 package com.alibaba.excel.markdown;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FilterReader;
 import java.io.IOException;
@@ -7,7 +9,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PushbackInputStream;
 import java.io.Reader;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -90,8 +91,7 @@ public final class XlsxToMarkdownConverter {
         if (startsWith(head, ZIP_MAGIC) || startsWith(head, OLE2_MAGIC)) {
             document.sheets.addAll(loadExcel(null, pushback));
         } else {
-            document.sheets.add(loadCsv(new BomStrippingReader(
-                new InputStreamReader(pushback, StandardCharsets.UTF_8)), "CSV"));
+            document.sheets.add(loadCsv(pushback, "CSV"));
         }
         return document;
     }
@@ -141,28 +141,43 @@ public final class XlsxToMarkdownConverter {
     private static SheetTable loadCsv(File file) {
         SheetTable table = new SheetTable();
         table.sheetName = baseName(file.getName());
-        try (Reader reader = new BomStrippingReader(
-            Files.newBufferedReader(file.toPath(), StandardCharsets.UTF_8))) {
-            fillFromCsv(table, reader);
+        try (InputStream in = Files.newInputStream(file.toPath())) {
+            fillFromCsv(table, in);
         } catch (IOException e) {
             throw new ExcelAnalysisException("Read CSV failure: " + file.getAbsolutePath(), e);
         }
         return table;
     }
 
-    private static SheetTable loadCsv(Reader reader, String sheetName) {
+    private static SheetTable loadCsv(InputStream inputStream, String sheetName) {
         SheetTable table = new SheetTable();
         table.sheetName = sheetName;
         try {
-            fillFromCsv(table, reader);
+            fillFromCsv(table, inputStream);
         } catch (IOException e) {
             throw new ExcelAnalysisException("Read CSV failure", e);
         }
         return table;
     }
 
-    private static void fillFromCsv(SheetTable table, Reader reader) throws IOException {
-        try (CSVParser parser = new CSVParser(reader, CSVFormat.DEFAULT)) {
+    private static void fillFromCsv(SheetTable table, InputStream in) throws IOException {
+        BufferedInputStream buffered = in instanceof BufferedInputStream ? (BufferedInputStream)in
+            : new BufferedInputStream(in, CsvDetector.SNIFF_LIMIT);
+        buffered.mark(CsvDetector.SNIFF_LIMIT);
+        byte[] head = new byte[CsvDetector.SNIFF_LIMIT];
+        int headLength = 0;
+        int count;
+        while (headLength < head.length
+            && (count = buffered.read(head, headLength, head.length - headLength)) != -1) {
+            headLength += count;
+        }
+        buffered.reset();
+        Reader decoded = new BomStrippingReader(
+            new InputStreamReader(buffered, CsvDetector.detectCharset(head)));
+        BufferedReader lineReader = new BufferedReader(decoded, CsvDetector.SNIFF_LIMIT);
+        char delimiter = CsvDetector.detectDelimiter(lineReader);
+        try (CSVParser parser = new CSVParser(lineReader,
+            CSVFormat.DEFAULT.builder().setDelimiter(delimiter).build())) {
             for (CSVRecord record : parser) {
                 List<String> row = new ArrayList<>();
                 for (String value : record) {
