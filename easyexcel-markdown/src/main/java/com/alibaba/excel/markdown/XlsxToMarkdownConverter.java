@@ -11,23 +11,25 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
 
 import com.alibaba.excel.EasyExcel;
+import com.alibaba.excel.ExcelReader;
 import com.alibaba.excel.context.AnalysisContext;
 import com.alibaba.excel.enums.CellExtraTypeEnum;
 import com.alibaba.excel.exception.ExcelAnalysisException;
 import com.alibaba.excel.metadata.CellExtra;
 import com.alibaba.excel.read.builder.ExcelReaderBuilder;
 import com.alibaba.excel.read.listener.ReadListener;
+import com.alibaba.excel.read.metadata.ReadSheet;
 import com.alibaba.excel.read.metadata.holder.ReadSheetHolder;
 
 /**
@@ -109,13 +111,22 @@ public final class XlsxToMarkdownConverter {
     }
 
     private static List<SheetTable> loadExcel(File file, InputStream inputStream) {
-        final Map<Integer, SheetTable> sheetMap = new LinkedHashMap<>(16);
+        // TreeMap keeps the deterministic workbook order by sheet number.
+        final Map<Integer, SheetTable> sheetMap = new TreeMap<>();
         final Map<Integer, List<int[]>> mergeMap = new HashMap<>(16);
         ExcelReaderBuilder builder = file != null ? EasyExcel.read(file) : EasyExcel.read(inputStream);
-        builder.headRowNumber(0)
+        try (ExcelReader reader = builder.headRowNumber(0)
             .extraRead(CellExtraTypeEnum.MERGE)
             .registerReadListener(new MarkdownReadListener(sheetMap, mergeMap))
-            .doReadAll();
+            .build()) {
+            // Pre register every sheet so that sheets without any row are still present.
+            for (ReadSheet readSheet : reader.excelExecutor().sheetList()) {
+                SheetTable table = new SheetTable();
+                table.sheetName = readSheet.getSheetName();
+                sheetMap.put(readSheet.getSheetNo(), table);
+            }
+            reader.readAll();
+        }
 
         List<SheetTable> tables = new ArrayList<>();
         for (Map.Entry<Integer, SheetTable> entry : sheetMap.entrySet()) {
