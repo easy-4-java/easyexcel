@@ -9,6 +9,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PushbackInputStream;
 import java.io.Reader;
+import java.io.Writer;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -112,6 +113,127 @@ public final class XlsxToMarkdownConverter {
      */
     public static String toMarkdown(InputStream inputStream) {
         return toStructured(inputStream).toMarkdown();
+    }
+
+    /**
+     * Convert the workbook to Markdown and write the result into the given {@link Writer}.
+     * The content is identical to {@link #toMarkdown(File)} but processes one sheet at a time
+     * so that memory usage is bounded by a single sheet rather than the whole document.
+     * <p>
+     * The writer is flushed but <em>not</em> closed.
+     *
+     * @param file
+     *            an XLSX, XLS or CSV file
+     * @param writer
+     *            the destination, flushed on completion
+     * @throws NullPointerException
+     *             if {@code file} or {@code writer} is {@code null}
+     */
+    public static void toMarkdown(File file, Writer writer) throws IOException {
+        Objects.requireNonNull(file, "file must not be null");
+        Objects.requireNonNull(writer, "writer must not be null");
+        if (!file.isFile()) {
+            throw new ExcelAnalysisException("File not found: " + file.getAbsolutePath());
+        }
+        writeTitle(writer, file.getName());
+        if (file.getName().toLowerCase(Locale.ROOT).endsWith(CSV_SUFFIX)) {
+            SheetTable table = loadCsv(file);
+            writer.write(table.toMarkdown());
+            writer.write('\n');
+        } else {
+            writeExcelStreaming(file, null, writer);
+        }
+        writer.flush();
+    }
+
+    /**
+     * Convert the workbook read from a stream to Markdown and write the result into the given
+     * {@link Writer}. The content is identical to {@link #toMarkdown(InputStream)} but processes
+     * one sheet at a time so that memory usage is bounded by a single sheet rather than the whole
+     * document.
+     * <p>
+     * The writer is flushed but <em>not</em> closed.
+     *
+     * @param inputStream
+     *            the workbook content, UTF-8 is assumed for CSV
+     * @param writer
+     *            the destination, flushed on completion
+     * @throws NullPointerException
+     *             if {@code inputStream} or {@code writer} is {@code null}
+     */
+    public static void toMarkdown(InputStream inputStream, Writer writer) throws IOException {
+        Objects.requireNonNull(inputStream, "inputStream must not be null");
+        Objects.requireNonNull(writer, "writer must not be null");
+        PushbackInputStream pushback = new PushbackInputStream(inputStream, ZIP_MAGIC.length);
+        byte[] head = sniff(pushback);
+        writeTitle(writer, "document");
+        if (startsWith(head, ZIP_MAGIC) || startsWith(head, OLE2_MAGIC)) {
+            writeExcelStreaming(null, pushback, writer);
+        } else {
+            SheetTable table = loadCsv(pushback, "CSV");
+            writer.write(table.toMarkdown());
+            writer.write('\n');
+        }
+        writer.flush();
+    }
+
+    private static void writeTitle(Writer writer, String title) throws IOException {
+        writer.write("# ");
+        writer.write(title == null ? "" : title);
+        writer.write("\n\n");
+    }
+
+    /**
+     * Streaming Excel read: process one sheet at a time, write its Markdown to the writer, then
+     * discard it from memory before reading the next sheet.
+     */
+    private static void writeExcelStreaming(File file, InputStream inputStream, Writer writer) throws IOException {
+        Map<Integer, Set<String>> pictureAnchors = Collections.emptyMap();
+        if (file != null && isZipFile(file)) {
+            try {
+                pictureAnchors = DrawingAnchorScanner.scanPictureAnchors(file);
+            } catch (IOException e) {
+                throw new ExcelAnalysisException("Read picture anchors failure", e);
+            }
+        }
+        final Map<Integer, SheetTable> sheetMap = new TreeMap<>();
+        final Map<Integer, List<int[]>> mergeMap = new HashMap<>(16);
+        final Map<Integer, Map<String, String>> hyperlinkMap = new HashMap<>(16);
+        final Map<Integer, Map<String, String>> commentMap = new HashMap<>(16);
+        ExcelReaderBuilder builder = file != null ? EasyExcel.read(file) : EasyExcel.read(inputStream);
+        try (ExcelReader reader = builder.headRowNumber(0)
+            .ignoreEmptyRow(false)
+            .extraRead(CellExtraTypeEnum.MERGE)
+            .extraRead(CellExtraTypeEnum.HYPERLINK)
+            .extraRead(CellExtraTypeEnum.COMMENT)
+            .registerReadListener(
+                new MarkdownReadListener(sheetMap, mergeMap, hyperlinkMap, commentMap))
+            .build()) {
+            for (ReadSheet readSheet : reader.excelExecutor().sheetList()) {
+                SheetTable table = new SheetTable();
+                table.sheetName = readSheet.getSheetName();
+                sheetMap.put(readSheet.getSheetNo(), table);
+            }
+            for (ReadSheet readSheet : reader.excelExecutor().sheetList()) {
+                int sheetNo = readSheet.getSheetNo();
+                reader.read(readSheet);
+                SheetTable table = sheetMap.get(sheetNo);
+                if (table != null) {
+                    normalizeWidth(table);
+                    applyMergedRegions(table, mergeMap.get(sheetNo));
+                    applyCellExtras(table, hyperlinkMap.get(sheetNo), commentMap.get(sheetNo));
+                    applyImagePlaceholders(table, pictureAnchors.get(sheetNo));
+                    trimTrailingEmptyRows(table);
+                    promoteFirstRowToHeader(table);
+                    writer.write(table.toMarkdown());
+                    writer.write('\n');
+                }
+                sheetMap.remove(sheetNo);
+                mergeMap.remove(sheetNo);
+                hyperlinkMap.remove(sheetNo);
+                commentMap.remove(sheetNo);
+            }
+        }
     }
 
     private static List<SheetTable> loadExcel(File file, InputStream inputStream) {
