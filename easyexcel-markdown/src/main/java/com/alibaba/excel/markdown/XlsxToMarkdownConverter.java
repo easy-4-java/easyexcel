@@ -20,6 +20,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.UUID;
 
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
@@ -35,6 +36,7 @@ import com.alibaba.excel.read.builder.ExcelReaderBuilder;
 import com.alibaba.excel.read.listener.ReadListener;
 import com.alibaba.excel.read.metadata.ReadSheet;
 import com.alibaba.excel.read.metadata.holder.ReadSheetHolder;
+import com.alibaba.excel.util.FileUtils;
 
 /**
  * Convert XLSX / XLS / CSV workbooks to structured Markdown using the Alibaba EasyExcel streaming
@@ -43,6 +45,15 @@ import com.alibaba.excel.read.metadata.holder.ReadSheetHolder;
  * Every sheet is preserved: the first row of each sheet becomes the table header, merged regions
  * reported through {@link CellExtraTypeEnum#MERGE} are filled with the top-left value before
  * rendering, and CSV input is parsed with Apache Commons CSV.
+ * <p>
+ * Picture placeholders: XLSX and legacy XLS drawings are scanned so that cells carrying an
+ * anchored picture render as {@code [image]}. The {@link InputStream} overloads spool the stream
+ * to a temporary file for XLSX/XLS content to enable picture scanning; if you want to avoid disk
+ * I/O, use the {@link File} overloads instead (CSV streams are never spooled).
+ * <p>
+ * Known format boundary: GitHub Flavored Markdown tables carry no cell styling (background,
+ * font, border; only per-column alignment via the delimiter row), so cell styles are rendered
+ * as displayed values only and intentionally dropped.
  *
  * @author wandl
  */
@@ -82,6 +93,9 @@ public final class XlsxToMarkdownConverter {
     /**
      * Read the whole workbook from a stream, dispatch is done by content sniffing of the first
      * bytes (ZIP magic means XLSX, OLE2 magic means XLS, anything else is treated as CSV).
+     * <p>
+     * For XLSX and XLS content the stream is spooled to a temporary file so that picture anchor
+     * scanning is possible. CSV content is read directly from the stream without spooling.
      *
      * @param inputStream
      *            the workbook content, UTF-8 is assumed for CSV
@@ -94,7 +108,14 @@ public final class XlsxToMarkdownConverter {
         SheetDocument document = new SheetDocument();
         document.title = "document";
         if (startsWith(head, ZIP_MAGIC) || startsWith(head, OLE2_MAGIC)) {
-            document.sheets.addAll(loadExcel(null, pushback));
+            File cacheDir = FileUtils.createCacheTmpFile();
+            try {
+                File tmp = new File(cacheDir, UUID.randomUUID() + ".tmp");
+                FileUtils.writeToFile(tmp, pushback, false);
+                document.sheets.addAll(loadExcel(tmp, null));
+            } finally {
+                FileUtils.delete(cacheDir);
+            }
         } else {
             document.sheets.add(loadCsv(pushback, "CSV"));
         }
@@ -152,6 +173,9 @@ public final class XlsxToMarkdownConverter {
      * one sheet at a time so that memory usage is bounded by a single sheet rather than the whole
      * document.
      * <p>
+     * For XLSX and XLS content the stream is spooled to a temporary file so that picture anchor
+     * scanning is possible. CSV content is read directly from the stream without spooling.
+     * <p>
      * The writer is flushed but <em>not</em> closed.
      *
      * @param inputStream
@@ -168,7 +192,14 @@ public final class XlsxToMarkdownConverter {
         byte[] head = sniff(pushback);
         writeTitle(writer, "document");
         if (startsWith(head, ZIP_MAGIC) || startsWith(head, OLE2_MAGIC)) {
-            writeExcelStreaming(null, pushback, writer);
+            File cacheDir = FileUtils.createCacheTmpFile();
+            try {
+                File tmp = new File(cacheDir, UUID.randomUUID() + ".tmp");
+                FileUtils.writeToFile(tmp, pushback, false);
+                writeExcelStreaming(tmp, null, writer);
+            } finally {
+                FileUtils.delete(cacheDir);
+            }
         } else {
             SheetTable table = loadCsv(pushback, "CSV");
             writer.write(table.toMarkdown());
@@ -188,14 +219,7 @@ public final class XlsxToMarkdownConverter {
      * discard it from memory before reading the next sheet.
      */
     private static void writeExcelStreaming(File file, InputStream inputStream, Writer writer) throws IOException {
-        Map<Integer, Set<String>> pictureAnchors = Collections.emptyMap();
-        if (file != null && isZipFile(file)) {
-            try {
-                pictureAnchors = DrawingAnchorScanner.scanPictureAnchors(file);
-            } catch (IOException e) {
-                throw new ExcelAnalysisException("Read picture anchors failure", e);
-            }
-        }
+        Map<Integer, Set<String>> pictureAnchors = scanAnchors(file);
         final Map<Integer, SheetTable> sheetMap = new TreeMap<>();
         final Map<Integer, List<int[]>> mergeMap = new HashMap<>(16);
         final Map<Integer, Map<String, String>> hyperlinkMap = new HashMap<>(16);
@@ -242,14 +266,7 @@ public final class XlsxToMarkdownConverter {
         final Map<Integer, List<int[]>> mergeMap = new HashMap<>(16);
         final Map<Integer, Map<String, String>> hyperlinkMap = new HashMap<>(16);
         final Map<Integer, Map<String, String>> commentMap = new HashMap<>(16);
-        Map<Integer, Set<String>> pictureAnchors = Collections.emptyMap();
-        if (file != null && isZipFile(file)) {
-            try {
-                pictureAnchors = DrawingAnchorScanner.scanPictureAnchors(file);
-            } catch (IOException e) {
-                throw new ExcelAnalysisException("Read picture anchors failure", e);
-            }
-        }
+        Map<Integer, Set<String>> pictureAnchors = scanAnchors(file);
         ExcelReaderBuilder builder = file != null ? EasyExcel.read(file) : EasyExcel.read(inputStream);
         try (ExcelReader reader = builder.headRowNumber(0)
             .ignoreEmptyRow(false)
@@ -280,6 +297,25 @@ public final class XlsxToMarkdownConverter {
             tables.add(table);
         }
         return tables;
+    }
+
+    /**
+     * Scan picture anchors from the given file. XLSX (ZIP) files use the streaming SAX scanner,
+     * legacy XLS (OLE2) files use the full HSSFWorkbook enumeration. Returns an empty map when
+     * {@code file} is {@code null} (InputStream-only path without spooling).
+     */
+    private static Map<Integer, Set<String>> scanAnchors(File file) {
+        if (file == null) {
+            return Collections.emptyMap();
+        }
+        try {
+            if (isZipFile(file)) {
+                return DrawingAnchorScanner.scanPictureAnchors(file);
+            }
+            return DrawingAnchorScanner.scanLegacyPictureAnchors(file);
+        } catch (IOException e) {
+            throw new ExcelAnalysisException("Read picture anchors failure", e);
+        }
     }
 
     /**
@@ -521,8 +557,9 @@ public final class XlsxToMarkdownConverter {
     }
 
     /**
-     * Only ZIP based workbooks (XLSX) can carry drawings the scanner understands, legacy XLS is
-     * skipped on purpose.
+     * Check whether a file starts with the ZIP magic bytes ({@code PK\x03\x04}).
+     * Both XLSX (ZIP) and legacy XLS (OLE2) workbooks are dispatched here: ZIP means XLSX,
+     * non-ZIP means legacy XLS.
      */
     private static boolean isZipFile(File file) {
         byte[] head = new byte[ZIP_MAGIC.length];
