@@ -1,6 +1,7 @@
 package com.alibaba.excel.markdown;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -29,6 +30,13 @@ public final class SheetTable {
      * Data rows, outer list is the row index, inner list is the cell value per column.
      */
     public List<List<String>> rows = new ArrayList<>();
+
+    /**
+     * Per-column alignment derived from the header row's cell styles: each entry is
+     * {@code "center"}, {@code "right"}, or {@code null} (left / general, the default).
+     * Empty list means no alignment information is available.
+     */
+    public List<String> columnAlignments = Collections.emptyList();
 
     /**
      * Render this sheet as a Markdown fragment: a {@code ##} heading followed by a GitHub
@@ -114,7 +122,14 @@ public final class SheetTable {
     private void appendTableSeparator(StringBuilder builder, int columnCount) {
         builder.append('|');
         for (int columnIndex = 0; columnIndex < columnCount; columnIndex++) {
-            builder.append(" --- |");
+            String align = columnIndex < columnAlignments.size() ? columnAlignments.get(columnIndex) : null;
+            if ("center".equals(align)) {
+                builder.append(" :---: |");
+            } else if ("right".equals(align)) {
+                builder.append(" ---: |");
+            } else {
+                builder.append(" --- |");
+            }
         }
         builder.append('\n');
     }

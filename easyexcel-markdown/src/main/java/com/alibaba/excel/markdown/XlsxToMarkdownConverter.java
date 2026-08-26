@@ -51,9 +51,13 @@ import com.alibaba.excel.util.FileUtils;
  * to a temporary file for XLSX/XLS content to enable picture scanning; if you want to avoid disk
  * I/O, use the {@link File} overloads instead (CSV streams are never spooled).
  * <p>
- * Known format boundary: GitHub Flavored Markdown tables carry no cell styling (background,
- * font, border; only per-column alignment via the delimiter row), so cell styles are rendered
- * as displayed values only and intentionally dropped.
+ * Cell style mapping: bold, italic and strikeout fonts are rendered as inline Markdown markers
+ * ({@code **bold**}, {@code *italic*}, {@code ~~strike~~}, combined as {@code ~~***mixed***~~}).
+ * Header-row horizontal alignment maps to GFM column alignment in the delimiter row
+ * ({@code :---:} for center, {@code ---:} for right, {@code ---} for left/general).
+ * <p>
+ * Known format boundary: color, border and background styling cannot be represented in GitHub
+ * Flavored Markdown tables and are intentionally dropped.
  *
  * @author wandl
  */
@@ -220,6 +224,7 @@ public final class XlsxToMarkdownConverter {
      */
     private static void writeExcelStreaming(File file, InputStream inputStream, Writer writer) throws IOException {
         Map<Integer, Set<String>> pictureAnchors = scanAnchors(file);
+        Map<Integer, Map<String, CellStyle>> cellStyles = scanCellStyles(file);
         final Map<Integer, SheetTable> sheetMap = new TreeMap<>();
         final Map<Integer, List<int[]>> mergeMap = new HashMap<>(16);
         final Map<Integer, Map<String, String>> hyperlinkMap = new HashMap<>(16);
@@ -249,6 +254,8 @@ public final class XlsxToMarkdownConverter {
                     applyImagePlaceholders(table, pictureAnchors.get(sheetNo));
                     trimTrailingEmptyRows(table);
                     promoteFirstRowToHeader(table);
+                    applyCellStyles(table, cellStyles.get(sheetNo));
+                    applyColumnAlignments(table, cellStyles.get(sheetNo));
                     writer.write(table.toMarkdown());
                     writer.write('\n');
                 }
@@ -267,6 +274,7 @@ public final class XlsxToMarkdownConverter {
         final Map<Integer, Map<String, String>> hyperlinkMap = new HashMap<>(16);
         final Map<Integer, Map<String, String>> commentMap = new HashMap<>(16);
         Map<Integer, Set<String>> pictureAnchors = scanAnchors(file);
+        Map<Integer, Map<String, CellStyle>> cellStyles = scanCellStyles(file);
         ExcelReaderBuilder builder = file != null ? EasyExcel.read(file) : EasyExcel.read(inputStream);
         try (ExcelReader reader = builder.headRowNumber(0)
             .ignoreEmptyRow(false)
@@ -294,9 +302,31 @@ public final class XlsxToMarkdownConverter {
             applyImagePlaceholders(table, pictureAnchors.get(entry.getKey()));
             trimTrailingEmptyRows(table);
             promoteFirstRowToHeader(table);
+            applyCellStyles(table, cellStyles.get(entry.getKey()));
+            applyColumnAlignments(table, cellStyles.get(entry.getKey()));
             tables.add(table);
         }
         return tables;
+    }
+
+    /**
+     * Scan cell styles from the given file. XLSX (ZIP) files use the streaming SAX scanner over
+     * styles.xml and sheet XML; legacy XLS (OLE2) files use the full HSSFWorkbook enumeration.
+     * Returns an empty map when {@code file} is {@code null} (InputStream-only path without
+     * spooling).
+     */
+    private static Map<Integer, Map<String, CellStyle>> scanCellStyles(File file) {
+        if (file == null) {
+            return Collections.emptyMap();
+        }
+        try {
+            if (isZipFile(file)) {
+                return CellStyleScanner.scanStyles(file);
+            }
+            return CellStyleScanner.scanLegacyStyles(file);
+        } catch (IOException e) {
+            throw new ExcelAnalysisException("Read cell styles failure", e);
+        }
     }
 
     /**
@@ -489,6 +519,82 @@ public final class XlsxToMarkdownConverter {
         String folded = comment.replace("\r\n", " ").replace('\r', ' ').replace('\n', ' ').trim();
         String cell = value == null ? "" : value;
         return cell.isEmpty() ? "<!-- " + folded + " -->" : cell + " <!-- " + folded + " -->";
+    }
+
+    /**
+     * Wrap non-empty cells with inline Markdown font markers according to their cell style.
+     * The wrapping order is strike(bold(italic(value))), so bold+italic+strike becomes
+     * {@code ~~***value***~~}. Styles are applied on top of any existing rendering (hyperlinks,
+     * comments).
+     */
+    private static void applyCellStyles(SheetTable table, Map<String, CellStyle> styles) {
+        if (styles == null || styles.isEmpty()) {
+            return;
+        }
+        // After promoteFirstRowToHeader, table.rows indices are shifted by the number of
+        // header rows removed.  Style map keys use the original row indices, so we must
+        // add the header row count to translate from table.rows position to original index.
+        int headerOffset = table.headers.size();
+        for (int rowIndex = 0; rowIndex < table.rows.size(); rowIndex++) {
+            List<String> row = table.rows.get(rowIndex);
+            int originalRowIndex = rowIndex + headerOffset;
+            for (int columnIndex = 0; columnIndex < row.size(); columnIndex++) {
+                CellStyle style = styles.get(originalRowIndex + CELL_KEY_SEPARATOR + columnIndex);
+                if (style == null) {
+                    continue;
+                }
+                String value = row.get(columnIndex);
+                if (value == null || value.isEmpty()) {
+                    continue;
+                }
+                row.set(columnIndex, wrapWithFontMarkers(value, style));
+            }
+        }
+    }
+
+    /**
+     * Wrap a value with inline Markdown font markers. Combination order:
+     * strike wraps bold wraps italic wraps value.
+     */
+    static String wrapWithFontMarkers(String value, CellStyle style) {
+        if (style.italic) {
+            value = "*" + value + "*";
+        }
+        if (style.bold) {
+            value = "**" + value + "**";
+        }
+        if (style.strikeout) {
+            value = "~~" + value + "~~";
+        }
+        return value;
+    }
+
+    /**
+     * Derive per-column alignment from the header row (row 0 before promotion) cell styles
+     * and store the result in {@link SheetTable#columnAlignments}.
+     */
+    private static void applyColumnAlignments(SheetTable table, Map<String, CellStyle> styles) {
+        if (styles == null || styles.isEmpty() || table.headers.isEmpty()) {
+            return;
+        }
+        List<String> headerRow = table.headers.get(0);
+        int columnCount = headerRow == null ? 0 : headerRow.size();
+        if (columnCount == 0) {
+            return;
+        }
+        List<String> alignments = new ArrayList<>(columnCount);
+        for (int col = 0; col < columnCount; col++) {
+            CellStyle style = styles.get("0" + CELL_KEY_SEPARATOR + col);
+            String horizontal = (style != null) ? style.horizontal : null;
+            if ("center".equals(horizontal)) {
+                alignments.add("center");
+            } else if ("right".equals(horizontal)) {
+                alignments.add("right");
+            } else {
+                alignments.add(null);
+            }
+        }
+        table.columnAlignments = alignments;
     }
 
     /**
