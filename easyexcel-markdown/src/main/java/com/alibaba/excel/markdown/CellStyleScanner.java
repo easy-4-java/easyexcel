@@ -13,8 +13,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
+import javax.xml.parsers.ParserConfigurationException;
 import javax.xml.parsers.SAXParser;
 import javax.xml.parsers.SAXParserFactory;
+
+import org.xml.sax.SAXException;
 
 import org.apache.poi.hssf.usermodel.HSSFCell;
 import org.apache.poi.hssf.usermodel.HSSFFont;
@@ -111,6 +114,16 @@ final class CellStyleScanner {
     static {
         SAX_FACTORY = SAXParserFactory.newInstance();
         SAX_FACTORY.setNamespaceAware(true);
+        // XXE 防护：禁用 DOCTYPE 声明与外部实体解析。恶意 xlsx 可在 sheet XML /
+        // styles.xml 内嵌外部实体引用（读本地文件 / SSRF）；失败即抛，不做静默降级。
+        try {
+            SAX_FACTORY.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+            SAX_FACTORY.setFeature("http://xml.org/sax/features/external-general-entities", false);
+            SAX_FACTORY.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+        } catch (ParserConfigurationException | SAXException e) {
+            throw new ExceptionInInitializerError(
+                "Unable to configure XXE protection for style scanner: " + e.getMessage());
+        }
     }
 
     private CellStyleScanner() {}
