@@ -16,10 +16,10 @@
     <name>easyexcel-core</name>
 
     <dependencies>
-<dependency>
-                <groupId>com.alibaba</groupId>
-                <artifactId>easyexcel-support</artifactId>
-            </dependency>
+        <dependency>
+            <groupId>io.github.easy4j</groupId>
+            <artifactId>easyexcel-support</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.apache.poi</groupId>
             <artifactId>poi</artifactId>

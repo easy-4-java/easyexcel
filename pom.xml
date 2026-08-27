@@ -89,9 +89,9 @@
             </dependency>
 
             <dependency>
-                <groupId>com.alibaba</groupId>
+                <groupId>io.github.easy4j</groupId>
                 <artifactId>easyexcel-support</artifactId>
-                <version>3.3.4</version>
+                <version>${revision}</version>
             </dependency>
 
             <dependency>
