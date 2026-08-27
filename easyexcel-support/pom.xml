@@ -5,13 +5,13 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.alibaba</groupId>
+        <groupId>io.github.easy4j</groupId>
         <artifactId>easyexcel-parent</artifactId>
         <version>${revision}</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <url>https://github.com/alibaba/easyexcel</url>
+    <url>https://github.com/easy-4-java/${project.artifactId}</url>
     <packaging>jar</packaging>
     <artifactId>easyexcel-support</artifactId>
     <name>easyexcel-support</name>
