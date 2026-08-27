@@ -42,7 +42,7 @@
 
         <!-- ─── (1) 构建与版本：CI-friendly revision 与编码/编译器/JVM 配置 ─── -->
         <!-- CI-friendly 单一版本源：发布前只改此一处，5 个子模块同步升级 -->
-        <revision>5.0.0</revision>
+        <revision>5.0.1</revision>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <jdk.version>1.8</jdk.version>
         <maven.compiler.source>${jdk.version}</maven.compiler.source>
