@@ -29,11 +29,10 @@
 
 
     <dependencies>
-        <!-- ===== Spring-core（被 maven-shade-plugin 重打包到 com.alibaba.excel.support） ===== -->
+        <!-- ===== Spring-core（被 maven-shade-plugin 重打包到 com.alibaba.excel.support；版本由根 pom 管理） ===== -->
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-core</artifactId>
-            <version>5.3.37</version>
             <exclusions>
                 <exclusion>
                     <groupId>*</groupId>

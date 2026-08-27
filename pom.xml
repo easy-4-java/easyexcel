@@ -51,7 +51,23 @@
         <!-- ─── (2) easyexcel 自家模块（fork 内自给，避免发 Maven Central 后才能依赖） ─── -->
         <!-- easyexcel-core / easyexcel-support / easyexcel-markdown 在 build 时按 reactor 顺序产出 -->
 
-        <!-- ─── (3) 核心三方依赖版本锁定（这些版本经本次 fork 安全审计通过） ─── -->
+        <!-- ─── (3) 核心三方依赖版本锁定（与 ddd4j-dependencies 同风格：
+             <artifactId>.version 属性 + 字母排序，dependencyManagement 统一引用；
+             现有版本均通过 JDK 8 兼容性验证，升级前须重跑全量回归） ─── -->
+        <assertj-core.version>3.25.3</assertj-core.version>
+        <commons-compress.version>1.27.1</commons-compress.version>
+        <commons-csv.version>1.11.0</commons-csv.version>
+        <commons-io.version>2.16.1</commons-io.version>
+        <ehcache.version>3.9.11</ehcache.version>
+        <fastjson2.version>2.0.51</fastjson2.version>
+        <junit-jupiter.version>5.10.2</junit-jupiter.version>
+        <lombok.version>1.18.32</lombok.version>
+        <logback-classic.version>1.5.6</logback-classic.version>
+        <poi.version>5.4.1</poi.version>
+        <poi-ooxml.version>${poi.version}</poi-ooxml.version>
+        <slf4j-api.version>1.7.36</slf4j-api.version>
+        <spring-boot.version>2.7.18</spring-boot.version>
+        <spring-core.version>5.3.37</spring-core.version>
 
         <!-- ─── (4) 测试与构建插件开关 ─── -->
         <!-- 默认跳过测试：私有仓库发布追求快；CI/回归请加 -Dmaven.test.skip=false -->
@@ -166,68 +182,112 @@
             </dependency>
 
             <!-- ===== POI 套件 ===== -->
-            <!-- poi-ooxml 5.4.1 修复 CVE-2025-31672（重复 ZIP entry） -->
+            <!-- poi-ooxml 5.4.1 修复 CVE-2025-31672（重复 ZIP entry 操纵解析） -->
             <dependency>
                 <groupId>org.apache.poi</groupId>
                 <artifactId>poi</artifactId>
-                <version>5.4.1</version>
+                <version>${poi.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.apache.poi</groupId>
                 <artifactId>poi-ooxml</artifactId>
-                <version>5.4.1</version>
+                <version>${poi-ooxml.version}</version>
             </dependency>
 
             <!-- ===== Apache Commons 套件 ===== -->
             <dependency>
                 <groupId>org.apache.commons</groupId>
                 <artifactId>commons-csv</artifactId>
-                <version>1.11.0</version>
+                <version>${commons-csv.version}</version>
             </dependency>
             <!-- commons-compress 1.27.1 修复 CVE-2024-26308 / CVE-2024-25710；
                  显式锁定防止依赖解析回退到受漏洞影响版本 -->
             <dependency>
                 <groupId>org.apache.commons</groupId>
                 <artifactId>commons-compress</artifactId>
-                <version>1.27.1</version>
+                <version>${commons-compress.version}</version>
             </dependency>
 
             <!-- ===== 缓存与 IO 工具 ===== -->
             <dependency>
                 <groupId>org.ehcache</groupId>
                 <artifactId>ehcache</artifactId>
-                <version>3.9.11</version>
+                <version>${ehcache.version}</version>
             </dependency>
             <dependency>
                 <groupId>commons-io</groupId>
                 <artifactId>commons-io</artifactId>
-                <version>2.16.1</version>
+                <version>${commons-io.version}</version>
             </dependency>
 
             <!-- ===== 日志与注解处理 ===== -->
             <dependency>
                 <groupId>org.slf4j</groupId>
                 <artifactId>slf4j-api</artifactId>
-                <version>1.7.36</version>
+                <version>${slf4j-api.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>slf4j-simple</artifactId>
+                <version>${slf4j-api.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>jcl-over-slf4j</artifactId>
+                <version>${slf4j-api.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.slf4j</groupId>
+                <artifactId>log4j-over-slf4j</artifactId>
+                <version>${slf4j-api.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.projectlombok</groupId>
                 <artifactId>lombok</artifactId>
-                <version>1.18.32</version>
+                <version>${lombok.version}</version>
                 <scope>provided</scope>
+            </dependency>
+
+            <!-- ===== Spring（support 的 shade 源 + test 的集成测试环境） ===== -->
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-core</artifactId>
+                <version>${spring-core.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-web</artifactId>
+                <version>${spring-boot.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-starter-test</artifactId>
+                <version>${spring-boot.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>ch.qos.logback</groupId>
+                <artifactId>logback-classic</artifactId>
+                <version>${logback-classic.version}</version>
+            </dependency>
+
+            <!-- ===== JSON（仅 easyexcel-test 使用） ===== -->
+            <dependency>
+                <groupId>com.alibaba.fastjson2</groupId>
+                <artifactId>fastjson2</artifactId>
+                <version>${fastjson2.version}</version>
             </dependency>
 
             <!-- ===== 测试框架（fork 内统一 JUnit5 + AssertJ） ===== -->
             <dependency>
                 <groupId>org.junit.jupiter</groupId>
                 <artifactId>junit-jupiter</artifactId>
-                <version>5.10.2</version>
+                <version>${junit-jupiter.version}</version>
                 <scope>test</scope>
             </dependency>
             <dependency>
                 <groupId>org.assertj</groupId>
                 <artifactId>assertj-core</artifactId>
-                <version>3.25.3</version>
+                <version>${assertj-core.version}</version>
                 <scope>test</scope>
             </dependency>
         </dependencies>
