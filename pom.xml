@@ -576,4 +576,112 @@
             -->
         </plugins>
     </build>
+
+    <!--
+      ════════════ profiles ════════════
+      central：发布到 Sonatype Central Portal（公共 Maven 中央仓库）。
+      激活方式：mvn deploy -Pcentral
+      前置条件（用户需在 https://central.sonatype.com 完成一次）：
+        1. 登录并验证 groupId io.github.easy4j 命名空间所有权
+        2. settings.xml 配置 <server><id>central</id><username>…</username><password>…</password></server>
+        3. 本机可用 GPG key（发布前 gpg -list-keys 确认）
+      发布说明：
+        - Central 校验要求 sources.jar + javadoc.jar + GPG 签名，本 profile 全部启用
+        - maven-deploy-plugin skip=true：避免 deploy 落到 distributionManagement（阿里云私仓）
+        - central-publishing-maven-plugin 负责上传到 Central Portal
+    -->
+    <profiles>
+        <profile>
+            <id>central</id>
+            <properties>
+                <!-- 覆盖根 pom 默认跳过项：Central 要求 javadoc jar + GPG 签名 -->
+                <maven.javadoc.skip>false</maven.javadoc.skip>
+                <gpg.skip>false</gpg.skip>
+            </properties>
+            <build>
+                <plugins>
+                    <!-- Central Portal 校验要求发布 sources jar -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                    </plugin>
+
+                    <!-- Central Portal 校验要求发布 javadoc jar；-Xdoclint:none 兼容存量中文注释 -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <version>3.12.0</version>
+                        <configuration>
+                            <additionalJOption>-Xdoclint:none</additionalJOption>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs-central</id>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+
+                    <!-- Central Portal 要求所有构件 GPG 签名 -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.8</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                        <configuration>
+                            <gpgArguments>
+                                <argument>--pinentry-mode</argument>
+                                <argument>loopback</argument>
+                            </gpgArguments>
+                        </configuration>
+                    </plugin>
+
+                    <!-- 禁用 maven-deploy-plugin：deploy 阶段交给 central-publishing-maven-plugin，
+                         避免构件落到 distributionManagement（阿里云私仓） -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-deploy-plugin</artifactId>
+                        <configuration>
+                            <skip>true</skip>
+                        </configuration>
+                    </plugin>
+
+                    <!-- Sonatype Central Portal 发布插件（https://central.sonatype.com/publish/publish-portal-maven/） -->
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.11.0</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <autoPublish>true</autoPublish>
+                            <waitUntil>published</waitUntil>
+                            <excludeArtifacts>
+                                <excludeArtifact>*-consumer.pom*</excludeArtifact>
+                            </excludeArtifacts>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>publish-to-central</id>
+                                <phase>deploy</phase>
+                                <goals>
+                                    <goal>publish</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>
