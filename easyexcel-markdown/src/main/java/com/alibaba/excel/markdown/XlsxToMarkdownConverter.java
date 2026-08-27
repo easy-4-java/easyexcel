@@ -13,6 +13,7 @@ import java.io.Writer;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -50,10 +51,11 @@ import com.alibaba.excel.util.FileUtils;
  * reported through {@link CellExtraTypeEnum#MERGE} are filled with the top-left value before
  * rendering, and CSV input is parsed with Apache Commons CSV.
  * <p>
- * Hidden rows and columns: the underlying easyexcel-core SAX read path does not inspect the
- * {@code hidden} attribute on {@code <row>} or {@code <col>} XML elements. As a result, hidden
- * rows and columns are included in the Markdown output as if they were visible. This is the
- * documented, intentional behavior -- no filtering is applied.
+ * Hidden rows and columns: during the same SAX pass that collects cell styles,
+ * {@link CellStyleScanner} also reads the {@code hidden} attribute on {@code <row>} and
+ * {@code <col>} XML elements. Hidden rows and columns are filtered out of the Markdown output.
+ * For legacy XLS files, {@link HSSFRow#getZeroHeight()} and
+ * {@link HSSFSheet#isColumnHidden(int)} are used instead.
  * <p>
  * Picture placeholders: XLSX and legacy XLS drawings are scanned so that cells carrying an
  * anchored picture render as {@code [image]}. The {@link InputStream} overloads spool the stream
@@ -290,7 +292,8 @@ public final class XlsxToMarkdownConverter {
     private static void writeExcelStreaming(File file, InputStream inputStream, Writer writer) throws IOException {
         Map<Integer, Set<String>> pictureAnchors = new HashMap<>(16);
         Map<Integer, Map<String, CellStyle>> cellStyles = new HashMap<>(16);
-        scanFileMetadata(file, pictureAnchors, cellStyles);
+        Map<Integer, CellStyleScanner.HiddenInfo> hiddenInfoMap = new HashMap<>(16);
+        scanFileMetadata(file, pictureAnchors, cellStyles, hiddenInfoMap);
         final Map<Integer, SheetTable> sheetMap = new TreeMap<>();
         final Map<Integer, List<int[]>> mergeMap = new HashMap<>(16);
         final Map<Integer, Map<String, String>> hyperlinkMap = new HashMap<>(16);
@@ -317,11 +320,14 @@ public final class XlsxToMarkdownConverter {
                     normalizeWidth(table);
                     applyMergedRegions(table, mergeMap.get(sheetNo));
                     applyCellExtras(table, hyperlinkMap.get(sheetNo), commentMap.get(sheetNo));
-                    applyImagePlaceholders(table, pictureAnchors.get(sheetNo));
+                    CellStyleScanner.HiddenInfo hiddenInfo = hiddenInfoMap.get(sheetNo);
+                    applyImagePlaceholders(table, pictureAnchors.get(sheetNo), hiddenInfo);
                     trimTrailingEmptyRows(table);
                     promoteFirstRowToHeader(table);
-                    applyCellStyles(table, cellStyles.get(sheetNo));
-                    applyColumnAlignments(table, cellStyles.get(sheetNo));
+                    HiddenFilterResult filterResult = filterHiddenRowsAndColumns(table, hiddenInfo);
+                    applyCellStyles(table, cellStyles.get(sheetNo),
+                        filterResult.newToOrigRow, filterResult.newToOrigCol);
+                    applyColumnAlignments(table, cellStyles.get(sheetNo), filterResult.newToOrigCol);
                     writer.write(table.toMarkdown());
                     writer.write('\n');
                 }
@@ -329,10 +335,9 @@ public final class XlsxToMarkdownConverter {
                 mergeMap.remove(sheetNo);
                 hyperlinkMap.remove(sheetNo);
                 commentMap.remove(sheetNo);
-                // pictureAnchors 和 cellStyles 的 key 也是 0-based sheet index，
-                // 与 sheetNo 语义一致，同样按 sheet 清理以释放内存。
                 pictureAnchors.remove(sheetNo);
                 cellStyles.remove(sheetNo);
+                hiddenInfoMap.remove(sheetNo);
             }
         }
     }
@@ -349,7 +354,8 @@ public final class XlsxToMarkdownConverter {
         final Map<Integer, Map<String, String>> commentMap = new HashMap<>(16);
         Map<Integer, Set<String>> pictureAnchors = new HashMap<>(16);
         Map<Integer, Map<String, CellStyle>> cellStyles = new HashMap<>(16);
-        scanFileMetadata(file, pictureAnchors, cellStyles);
+        Map<Integer, CellStyleScanner.HiddenInfo> hiddenInfoMap = new HashMap<>(16);
+        scanFileMetadata(file, pictureAnchors, cellStyles, hiddenInfoMap);
         ExcelReaderBuilder builder = file != null ? EasyExcel.read(file) : EasyExcel.read(inputStream);
         try (ExcelReader reader = builder.headRowNumber(0)
             .ignoreEmptyRow(false)
@@ -370,22 +376,26 @@ public final class XlsxToMarkdownConverter {
 
         List<SheetTable> tables = new ArrayList<>();
         for (Map.Entry<Integer, SheetTable> entry : sheetMap.entrySet()) {
+            int sheetNo = entry.getKey();
             SheetTable table = entry.getValue();
             normalizeWidth(table);
-            applyMergedRegions(table, mergeMap.get(entry.getKey()), headRowNumber);
-            applyCellExtras(table, hyperlinkMap.get(entry.getKey()), commentMap.get(entry.getKey()));
-            applyImagePlaceholders(table, pictureAnchors.get(entry.getKey()));
+            applyMergedRegions(table, mergeMap.get(sheetNo), headRowNumber);
+            applyCellExtras(table, hyperlinkMap.get(sheetNo), commentMap.get(sheetNo));
+            CellStyleScanner.HiddenInfo hiddenInfo = hiddenInfoMap.get(sheetNo);
+            applyImagePlaceholders(table, pictureAnchors.get(sheetNo), hiddenInfo);
             trimTrailingEmptyRows(table);
             promoteRowsToHeader(table, headRowNumber);
-            applyCellStyles(table, cellStyles.get(entry.getKey()));
-            applyColumnAlignments(table, cellStyles.get(entry.getKey()));
+            HiddenFilterResult filterResult = filterHiddenRowsAndColumns(table, hiddenInfo);
+            applyCellStyles(table, cellStyles.get(sheetNo),
+                filterResult.newToOrigRow, filterResult.newToOrigCol);
+            applyColumnAlignments(table, cellStyles.get(sheetNo), filterResult.newToOrigCol);
             tables.add(table);
         }
         return tables;
     }
 
     /**
-     * Scan both picture anchors and cell styles from the given file in a single pass.
+     * Scan picture anchors, cell styles and hidden row/col info from the given file in a single pass.
      * For XLSX (ZIP) files, opens {@link OPCPackage} once and shares the {@link XSSFReader}
      * between the two scanners, avoiding redundant package openings. The package is closed
      * before this method returns so that downstream readers (e.g. EasyExcel) can open their
@@ -402,10 +412,13 @@ public final class XlsxToMarkdownConverter {
      *            output map for picture anchors (populated in-place)
      * @param stylesOut
      *            output map for cell styles (populated in-place)
+     * @param hiddenOut
+     *            output map for hidden row/col info (populated in-place)
      */
     private static void scanFileMetadata(File file,
         Map<Integer, Set<String>> anchorsOut,
-        Map<Integer, Map<String, CellStyle>> stylesOut) {
+        Map<Integer, Map<String, CellStyle>> stylesOut,
+        Map<Integer, CellStyleScanner.HiddenInfo> hiddenOut) {
         if (file == null) {
             return;
         }
@@ -417,7 +430,9 @@ public final class XlsxToMarkdownConverter {
                     pkg = OPCPackage.open(file, PackageAccess.READ);
                     XSSFReader reader = new XSSFReader(pkg);
                     anchorsOut.putAll(DrawingAnchorScanner.scanPictureAnchors(reader));
-                    stylesOut.putAll(CellStyleScanner.scanStyles(reader));
+                    CellStyleScanner.ScanResult scanResult = CellStyleScanner.scanStyles(reader);
+                    stylesOut.putAll(scanResult.styles);
+                    hiddenOut.putAll(scanResult.hiddenInfo);
                 } catch (IOException e) {
                     throw e;
                 } finally {
@@ -432,7 +447,9 @@ public final class XlsxToMarkdownConverter {
             } else {
                 // Legacy XLS
                 anchorsOut.putAll(DrawingAnchorScanner.scanLegacyPictureAnchors(file));
-                stylesOut.putAll(CellStyleScanner.scanLegacyStyles(file));
+                CellStyleScanner.ScanResult scanResult = CellStyleScanner.scanLegacyStyles(file);
+                stylesOut.putAll(scanResult.styles);
+                hiddenOut.putAll(scanResult.hiddenInfo);
             }
         } catch (IOException e) {
             throw new ExcelAnalysisException("Read metadata failure", e);
@@ -444,14 +461,33 @@ public final class XlsxToMarkdownConverter {
     /**
      * Mark the anchor cell of every picture with a placeholder, keeping any value the cell
      * already carries. Rows and columns that only exist because of a picture are created.
+     * 跳过位于隐藏行或隐藏列上的图片锚点。
+     *
+     * @param table
+     *            the sheet table
+     * @param anchors
+     *            picture anchor positions in {@code "row:col"} format
+     * @param hiddenInfo
+     *            hidden row/col info, may be {@code null}
      */
-    private static void applyImagePlaceholders(SheetTable table, Set<String> anchors) {
+    private static void applyImagePlaceholders(SheetTable table, Set<String> anchors,
+        CellStyleScanner.HiddenInfo hiddenInfo) {
         if (anchors == null || anchors.isEmpty()) {
             return;
         }
+        Set<Integer> hiddenRows = (hiddenInfo != null)
+            ? hiddenInfo.hiddenRows : Collections.<Integer>emptySet();
+        Set<Integer> hiddenCols = (hiddenInfo != null)
+            ? hiddenInfo.hiddenCols : Collections.<Integer>emptySet();
         int maxRow = -1;
         for (String anchor : anchors) {
-            maxRow = Math.max(maxRow, Integer.parseInt(anchor.substring(0, anchor.indexOf(CELL_KEY_SEPARATOR))));
+            int separator = anchor.indexOf(CELL_KEY_SEPARATOR);
+            int rowIndex = Integer.parseInt(anchor.substring(0, separator));
+            int columnIndex = Integer.parseInt(anchor.substring(separator + CELL_KEY_SEPARATOR.length()));
+            if (hiddenRows.contains(rowIndex) || hiddenCols.contains(columnIndex)) {
+                continue;
+            }
+            maxRow = Math.max(maxRow, rowIndex);
         }
         while (table.rows.size() <= maxRow) {
             table.rows.add(new ArrayList<>());
@@ -460,6 +496,9 @@ public final class XlsxToMarkdownConverter {
             int separator = anchor.indexOf(CELL_KEY_SEPARATOR);
             int rowIndex = Integer.parseInt(anchor.substring(0, separator));
             int columnIndex = Integer.parseInt(anchor.substring(separator + CELL_KEY_SEPARATOR.length()));
+            if (hiddenRows.contains(rowIndex) || hiddenCols.contains(columnIndex)) {
+                continue;
+            }
             List<String> row = table.rows.get(rowIndex);
             for (int columnIndexToPad = row.size(); columnIndexToPad <= columnIndex; columnIndexToPad++) {
                 row.add("");
@@ -756,28 +795,38 @@ public final class XlsxToMarkdownConverter {
      * The wrapping order is strike(bold(italic(value))), so bold+italic+strike becomes
      * {@code ~~***value***~~}. Styles are applied on top of any existing rendering (hyperlinks,
      * comments).
+     *
+     * @param table
+     *            the sheet table
+     * @param styles
+     *            cell style map keyed by {@code "origRow:origCol"}
+     * @param newToOrigRow
+     *            new data row index to original row index mapping, may be {@code null}
+     * @param newToOrigCol
+     *            new column index to original column index mapping, may be {@code null}
      */
-    private static void applyCellStyles(SheetTable table, Map<String, CellStyle> styles) {
+    private static void applyCellStyles(SheetTable table, Map<String, CellStyle> styles,
+        List<Integer> newToOrigRow, List<Integer> newToOrigCol) {
         if (styles == null || styles.isEmpty()) {
             return;
         }
-        // After promoteFirstRowToHeader, table.rows indices are shifted by the number of
-        // header rows removed.  Style map keys use the original row indices, so we must
-        // add the header row count to translate from table.rows position to original index.
         int headerOffset = table.headers.size();
         for (int rowIndex = 0; rowIndex < table.rows.size(); rowIndex++) {
             List<String> row = table.rows.get(rowIndex);
-            int originalRowIndex = rowIndex + headerOffset;
-            for (int columnIndex = 0; columnIndex < row.size(); columnIndex++) {
-                CellStyle style = styles.get(originalRowIndex + CELL_KEY_SEPARATOR + columnIndex);
+            int originalRowIndex = (newToOrigRow != null && rowIndex < newToOrigRow.size())
+                ? newToOrigRow.get(rowIndex) : rowIndex + headerOffset;
+            for (int colIndex = 0; colIndex < row.size(); colIndex++) {
+                int originalColIndex = (newToOrigCol != null && colIndex < newToOrigCol.size())
+                    ? newToOrigCol.get(colIndex) : colIndex;
+                CellStyle style = styles.get(originalRowIndex + CELL_KEY_SEPARATOR + originalColIndex);
                 if (style == null) {
                     continue;
                 }
-                String value = row.get(columnIndex);
+                String value = row.get(colIndex);
                 if (value == null || value.isEmpty()) {
                     continue;
                 }
-                row.set(columnIndex, wrapWithFontMarkers(value, style));
+                row.set(colIndex, wrapWithFontMarkers(value, style));
             }
         }
     }
@@ -865,8 +914,16 @@ public final class XlsxToMarkdownConverter {
     /**
      * Derive per-column alignment from the header row (row 0 before promotion) cell styles
      * and store the result in {@link SheetTable#columnAlignments}.
+     *
+     * @param table
+     *            the sheet table
+     * @param styles
+     *            cell style map keyed by {@code "origRow:origCol"}
+     * @param newToOrigCol
+     *            new column index to original column index mapping, may be {@code null}
      */
-    private static void applyColumnAlignments(SheetTable table, Map<String, CellStyle> styles) {
+    private static void applyColumnAlignments(SheetTable table, Map<String, CellStyle> styles,
+        List<Integer> newToOrigCol) {
         if (styles == null || styles.isEmpty() || table.headers.isEmpty()) {
             return;
         }
@@ -877,7 +934,9 @@ public final class XlsxToMarkdownConverter {
         }
         List<String> alignments = new ArrayList<>(columnCount);
         for (int col = 0; col < columnCount; col++) {
-            CellStyle style = styles.get("0" + CELL_KEY_SEPARATOR + col);
+            int originalColIndex = (newToOrigCol != null && col < newToOrigCol.size())
+                ? newToOrigCol.get(col) : col;
+            CellStyle style = styles.get("0" + CELL_KEY_SEPARATOR + originalColIndex);
             String horizontal = (style != null) ? style.horizontal : null;
             if ("center".equals(horizontal)) {
                 alignments.add("center");
@@ -923,6 +982,126 @@ public final class XlsxToMarkdownConverter {
         int count = Math.min(headRowNumber, table.rows.size());
         table.headers.addAll(table.rows.subList(0, count));
         table.rows.subList(0, count).clear();
+    }
+
+    /**
+     * 隐藏行列过滤的结果：新索引到原始索引的映射。
+     * 供 {@link #applyCellStyles} 和 {@link #applyColumnAlignments} 使用。
+     */
+    private static final class HiddenFilterResult {
+        /** 新数据行索引 → 原始行索引（过滤前）。{@code null} 表示未做过滤。 */
+        final List<Integer> newToOrigRow;
+        /** 新列索引 → 原始列索引（过滤前）。{@code null} 表示未做过滤。 */
+        final List<Integer> newToOrigCol;
+
+        HiddenFilterResult(List<Integer> newToOrigRow, List<Integer> newToOrigCol) {
+            this.newToOrigRow = newToOrigRow;
+            this.newToOrigCol = newToOrigCol;
+        }
+    }
+
+    /**
+     * 过滤隐藏的行和列。在 promoteFirstRowToHeader 之后调用。
+     * <p>
+     * 过滤后，返回新索引到原始索引的映射，供后续样式应用步骤使用
+     * （因为样式 map 的 key 是原始行列索引）。
+     *
+     * @param table
+     *            the sheet table (modified in-place)
+     * @param hiddenInfo
+     *            hidden row/col info, may be {@code null}
+     * @return 新索引到原始索引的映射
+     */
+    private static HiddenFilterResult filterHiddenRowsAndColumns(SheetTable table,
+        CellStyleScanner.HiddenInfo hiddenInfo) {
+        if (hiddenInfo == null) {
+            return new HiddenFilterResult(null, null);
+        }
+        Set<Integer> hiddenRows = hiddenInfo.hiddenRows;
+        Set<Integer> hiddenCols = hiddenInfo.hiddenCols;
+        boolean hasHiddenRows = hiddenRows != null && !hiddenRows.isEmpty();
+        boolean hasHiddenCols = hiddenCols != null && !hiddenCols.isEmpty();
+        if (!hasHiddenRows && !hasHiddenCols) {
+            return new HiddenFilterResult(null, null);
+        }
+
+        int originalHeaderCount = table.headers.size();
+
+        // 构建数据行的新→原始索引映射
+        List<Integer> newToOrigRow = new ArrayList<>(table.rows.size());
+        for (int i = 0; i < table.rows.size(); i++) {
+            int origIdx = i + originalHeaderCount;
+            if (!hasHiddenRows || !hiddenRows.contains(origIdx)) {
+                newToOrigRow.add(origIdx);
+            }
+        }
+
+        // 构建列的新→原始索引映射
+        int maxCol = 0;
+        for (List<String> row : table.rows) {
+            maxCol = Math.max(maxCol, row.size());
+        }
+        for (List<String> header : table.headers) {
+            maxCol = Math.max(maxCol, header.size());
+        }
+        List<Integer> newToOrigCol = new ArrayList<>(maxCol);
+        for (int i = 0; i < maxCol; i++) {
+            if (!hasHiddenCols || !hiddenCols.contains(i)) {
+                newToOrigCol.add(i);
+            }
+        }
+
+        // 过滤隐藏的表头行
+        if (hasHiddenRows) {
+            List<List<String>> filteredHeaders = new ArrayList<>(table.headers.size());
+            for (int i = 0; i < table.headers.size(); i++) {
+                if (!hiddenRows.contains(i)) {
+                    filteredHeaders.add(table.headers.get(i));
+                }
+            }
+            table.headers = filteredHeaders;
+        }
+
+        // 过滤隐藏的数据行
+        if (hasHiddenRows) {
+            List<List<String>> filteredRows = new ArrayList<>(table.rows.size());
+            for (int i = 0; i < table.rows.size(); i++) {
+                int origIdx = i + originalHeaderCount;
+                if (!hiddenRows.contains(origIdx)) {
+                    filteredRows.add(table.rows.get(i));
+                }
+            }
+            table.rows = filteredRows;
+        }
+
+        // 过滤隐藏的列
+        if (hasHiddenCols) {
+            for (List<String> header : table.headers) {
+                filterColumnsFromRow(header, hiddenCols);
+            }
+            for (List<String> row : table.rows) {
+                filterColumnsFromRow(row, hiddenCols);
+            }
+        }
+
+        return new HiddenFilterResult(newToOrigRow, newToOrigCol);
+    }
+
+    /**
+     * 从一行中移除隐藏列对应的单元格（就地修改）。
+     */
+    private static void filterColumnsFromRow(List<String> row, Set<Integer> hiddenCols) {
+        if (row == null || hiddenCols == null || hiddenCols.isEmpty()) {
+            return;
+        }
+        List<String> filtered = new ArrayList<>(row.size());
+        for (int i = 0; i < row.size(); i++) {
+            if (!hiddenCols.contains(i)) {
+                filtered.add(row.get(i));
+            }
+        }
+        row.clear();
+        row.addAll(filtered);
     }
 
     private static String cell(List<List<String>> rows, int rowIndex, int columnIndex) {

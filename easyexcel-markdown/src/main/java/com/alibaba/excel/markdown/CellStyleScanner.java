@@ -7,9 +7,11 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 
 import javax.xml.parsers.SAXParser;
 import javax.xml.parsers.SAXParserFactory;
@@ -88,17 +90,59 @@ final class CellStyleScanner {
     private CellStyleScanner() {}
 
     /**
+     * 每个 sheet 的隐藏行列信息，行/列索引均为 0-based。
+     */
+    static final class HiddenInfo {
+        final Set<Integer> hiddenRows;
+        final Set<Integer> hiddenCols;
+
+        HiddenInfo(Set<Integer> hiddenRows, Set<Integer> hiddenCols) {
+            this.hiddenRows = hiddenRows != null ? hiddenRows : Collections.<Integer>emptySet();
+            this.hiddenCols = hiddenCols != null ? hiddenCols : Collections.<Integer>emptySet();
+        }
+    }
+
+    /**
+     * 样式扫描的完整结果：单元格样式 + 隐藏行列信息。
+     */
+    static final class ScanResult {
+        final Map<Integer, Map<String, CellStyle>> styles;
+        final Map<Integer, HiddenInfo> hiddenInfo;
+
+        ScanResult(Map<Integer, Map<String, CellStyle>> styles, Map<Integer, HiddenInfo> hiddenInfo) {
+            this.styles = styles;
+            this.hiddenInfo = hiddenInfo;
+        }
+    }
+
+    /**
+     * 单个 sheet 的 SAX 解析结果：单元格样式 + 隐藏行列。
+     */
+    private static final class SheetParseResult {
+        final Map<String, CellStyle> styles;
+        final Set<Integer> hiddenRows;
+        final Set<Integer> hiddenCols;
+
+        SheetParseResult(Map<String, CellStyle> styles, Set<Integer> hiddenRows, Set<Integer> hiddenCols) {
+            this.styles = styles;
+            this.hiddenRows = hiddenRows;
+            this.hiddenCols = hiddenCols;
+        }
+    }
+
+    /**
      * Scan XLSX cell styles in a streaming fashion (SAX over styles.xml and each sheet).
      * Also parses sharedStrings.xml to extract rich text run-level formatting for cells
      * that reference shared strings with mixed formatting (e.g. partial bold).
+     * 同时收集隐藏行/列信息。
      *
      * @param file
      *            an XLSX file (ZIP-based)
-     * @return per-sheet map of {@code "row:col"} to non-plain {@link CellStyle}, never {@code null}
+     * @return 包含单元格样式和隐藏行列信息的扫描结果
      * @throws IOException
      *             if the file cannot be read
      */
-    static Map<Integer, Map<String, CellStyle>> scanStyles(File file) throws IOException {
+    static ScanResult scanStyles(File file) throws IOException {
         OPCPackage pkg = null;
         try {
             pkg = OPCPackage.open(file, PackageAccess.READ);
@@ -122,16 +166,17 @@ final class CellStyleScanner {
     /**
      * Scan XLSX cell styles using an already-opened {@link XSSFReader}.
      * This overload allows the caller to share a single {@link OPCPackage} opening
-     * across multiple scanners.
+     * across multiple scanners. 同时收集隐藏行/列信息。
      *
      * @param reader
      *            an already-opened XSSFReader (caller retains ownership)
-     * @return per-sheet map of {@code "row:col"} to non-plain {@link CellStyle}, never {@code null}
+     * @return 包含单元格样式和隐藏行列信息的扫描结果
      * @throws IOException
      *             if the styles or sheet data cannot be read
      */
-    static Map<Integer, Map<String, CellStyle>> scanStyles(XSSFReader reader) throws IOException {
-        Map<Integer, Map<String, CellStyle>> result = new HashMap<>(16);
+    static ScanResult scanStyles(XSSFReader reader) throws IOException {
+        Map<Integer, Map<String, CellStyle>> styles = new HashMap<>(16);
+        Map<Integer, HiddenInfo> hiddenInfo = new HashMap<>(16);
         try {
             // 1. Parse styles.xml to build font and cellXfs lookup lists.
             List<FontFlags> fonts;
@@ -156,16 +201,19 @@ final class CellStyleScanner {
             // 2. Parse sharedStrings.xml for rich text run-level formatting.
             List<List<CellStyle.RunStyle>> sharedStringRuns = parseSharedStringRuns(reader);
 
-            // 3. For each sheet, SAX-parse the sheet XML to collect non-plain cells.
+            // 3. For each sheet, SAX-parse the sheet XML to collect non-plain cells and hidden rows/cols.
             XSSFReader.SheetIterator sheets = (XSSFReader.SheetIterator) reader.getSheetsData();
             int sheetIndex = 0;
             while (sheets.hasNext()) {
                 InputStream sheetStream = sheets.next();
                 try {
-                    Map<String, CellStyle> sheetStyles = parseSheetStyles(
+                    SheetParseResult sheetResult = parseSheetStyles(
                         sheetStream, fonts, fontIds, horizontals, sharedStringRuns);
-                    if (!sheetStyles.isEmpty()) {
-                        result.put(sheetIndex, sheetStyles);
+                    if (!sheetResult.styles.isEmpty()) {
+                        styles.put(sheetIndex, sheetResult.styles);
+                    }
+                    if (!sheetResult.hiddenRows.isEmpty() || !sheetResult.hiddenCols.isEmpty()) {
+                        hiddenInfo.put(sheetIndex, new HiddenInfo(sheetResult.hiddenRows, sheetResult.hiddenCols));
                     }
                 } finally {
                     sheetStream.close();
@@ -177,12 +225,14 @@ final class CellStyleScanner {
         } catch (Exception e) {
             throw new IOException("Scan cell styles failure", e);
         }
-        return result;
+        return new ScanResult(styles, hiddenInfo);
     }
 
     /**
      * Scan legacy XLS cell styles by loading the workbook into memory and enumerating every cell.
      * Acceptable because XLS is capped at 65536 rows x 256 columns.
+     * 同时收集隐藏行/列信息（通过 {@link HSSFRow#getZeroHeight()} 和
+     * {@link HSSFSheet#isColumnHidden(int)}）。
      * <p>
      * Rich text run extraction: cells with {@link HSSFRichTextString} that carry multiple
      * formatting runs are detected and their per-run bold/italic/strikeout flags are extracted
@@ -192,24 +242,35 @@ final class CellStyleScanner {
      *
      * @param file
      *            an XLS file (OLE2-based)
-     * @return per-sheet map of {@code "row:col"} to non-plain {@link CellStyle}, never {@code null}
+     * @return 包含单元格样式和隐藏行列信息的扫描结果
      * @throws IOException
      *             if the file cannot be read
      */
-    static Map<Integer, Map<String, CellStyle>> scanLegacyStyles(File file) throws IOException {
-        Map<Integer, Map<String, CellStyle>> result = new HashMap<>(16);
+    static ScanResult scanLegacyStyles(File file) throws IOException {
+        Map<Integer, Map<String, CellStyle>> styles = new HashMap<>(16);
+        Map<Integer, HiddenInfo> hiddenInfo = new HashMap<>(16);
         try (InputStream in = Files.newInputStream(file.toPath());
              HSSFWorkbook workbook = new HSSFWorkbook(in)) {
             int sheetCount = workbook.getNumberOfSheets();
             for (int sheetIndex = 0; sheetIndex < sheetCount; sheetIndex++) {
                 HSSFSheet sheet = workbook.getSheetAt(sheetIndex);
                 Map<String, CellStyle> sheetStyles = new HashMap<>(16);
+                Set<Integer> sheetHiddenRows = new HashSet<>(16);
+                // 收集隐藏行和单元格样式
+                int maxCol = 0;
                 for (int rowIndex = sheet.getFirstRowNum(); rowIndex <= sheet.getLastRowNum(); rowIndex++) {
                     HSSFRow row = sheet.getRow(rowIndex);
                     if (row == null) {
                         continue;
                     }
-                    for (int colIndex = row.getFirstCellNum(); colIndex <= row.getLastCellNum(); colIndex++) {
+                    if (row.getZeroHeight()) {
+                        sheetHiddenRows.add(rowIndex);
+                    }
+                    int lastCell = row.getLastCellNum();
+                    if (lastCell > maxCol) {
+                        maxCol = lastCell;
+                    }
+                    for (int colIndex = row.getFirstCellNum(); colIndex <= lastCell; colIndex++) {
                         HSSFCell cell = row.getCell(colIndex);
                         if (cell == null) {
                             continue;
@@ -220,12 +281,22 @@ final class CellStyleScanner {
                         }
                     }
                 }
+                // 收集隐藏列
+                Set<Integer> sheetHiddenCols = new HashSet<>(16);
+                for (int colIndex = 0; colIndex < maxCol; colIndex++) {
+                    if (sheet.isColumnHidden(colIndex)) {
+                        sheetHiddenCols.add(colIndex);
+                    }
+                }
                 if (!sheetStyles.isEmpty()) {
-                    result.put(sheetIndex, sheetStyles);
+                    styles.put(sheetIndex, sheetStyles);
+                }
+                if (!sheetHiddenRows.isEmpty() || !sheetHiddenCols.isEmpty()) {
+                    hiddenInfo.put(sheetIndex, new HiddenInfo(sheetHiddenRows, sheetHiddenCols));
                 }
             }
         }
-        return result;
+        return new ScanResult(styles, hiddenInfo);
     }
 
     /**
@@ -536,7 +607,7 @@ final class CellStyleScanner {
      * up from the pre-parsed shared string runs list. For other cells, the cellXfs-based
      * font lookup is used.
      */
-    private static Map<String, CellStyle> parseSheetStyles(InputStream sheetStream,
+    private static SheetParseResult parseSheetStyles(InputStream sheetStream,
         List<FontFlags> fonts, List<Integer> fontIds, List<String> horizontals,
         List<List<CellStyle.RunStyle>> sharedStringRuns) throws Exception {
         SAXParser parser = SAX_FACTORY.newSAXParser();
@@ -545,7 +616,14 @@ final class CellStyleScanner {
             sharedStringRuns);
         xmlReader.setContentHandler(handler);
         xmlReader.parse(new InputSource(sheetStream));
-        return handler.result;
+        // 将 colHiddenState 转换为 hiddenCols 集合
+        Set<Integer> hiddenCols = new HashSet<>(handler.colHiddenState.size());
+        for (Map.Entry<Integer, Boolean> entry : handler.colHiddenState.entrySet()) {
+            if (entry.getValue()) {
+                hiddenCols.add(entry.getKey());
+            }
+        }
+        return new SheetParseResult(handler.result, handler.hiddenRows, hiddenCols);
     }
 
     /**
@@ -562,12 +640,24 @@ final class CellStyleScanner {
         private static final String ATTR_TYPE = "t";
         private static final String TYPE_SHARED_STRING = "s";
         private static final String EL_V = "v";
+        private static final String EL_ROW = "row";
+        private static final String EL_COL = "col";
+        private static final String ATTR_HIDDEN = "hidden";
+        private static final String ATTR_R = "r";
+        private static final String ATTR_MIN = "min";
+        private static final String ATTR_MAX = "max";
+        private static final String HIDDEN_VALUE = "1";
+        private static final String HIDDEN_VALUE_TRUE = "true";
 
         private final List<FontFlags> fonts;
         private final List<Integer> fontIds;
         private final List<String> horizontals;
         private final List<List<CellStyle.RunStyle>> sharedStringRuns;
         private final Map<String, CellStyle> result = new HashMap<>(INITIAL_CAPACITY);
+        /** 隐藏行集合，0-based 行索引。 */
+        private final Set<Integer> hiddenRows = new HashSet<>(INITIAL_CAPACITY);
+        /** 每列的隐藏状态，用于正确处理 {@code <col>} 元素的覆盖语义。 */
+        private final Map<Integer, Boolean> colHiddenState = new HashMap<>(INITIAL_CAPACITY);
 
         /** Set when a {@code <c t="s">} is encountered; cleared on {@code </c>}. */
         private String pendingSsKey;
@@ -588,7 +678,11 @@ final class CellStyleScanner {
 
         @Override
         public void startElement(String uri, String localName, String qName, Attributes attributes) {
-            if (EL_C.equals(localName)) {
+            if (EL_ROW.equals(localName)) {
+                handleRowStart(attributes);
+            } else if (EL_COL.equals(localName)) {
+                handleColStart(attributes);
+            } else if (EL_C.equals(localName)) {
                 handleCellStart(attributes);
             } else if (EL_V.equals(localName) && pendingSsKey != null) {
                 inV = true;
@@ -612,6 +706,61 @@ final class CellStyleScanner {
                 pendingSsKey = null;
                 pendingStyleIdx = null;
             }
+        }
+
+        /**
+         * 处理 {@code <row>} 元素。若 hidden 属性为 "1" 或 "true"，将该行（0-based）加入隐藏集合。
+         */
+        private void handleRowStart(Attributes attributes) {
+            String hiddenAttr = attributes.getValue(ATTR_HIDDEN);
+            if (isHiddenValue(hiddenAttr)) {
+                String rAttr = attributes.getValue(ATTR_R);
+                if (rAttr != null) {
+                    try {
+                        int rowNum = Integer.parseInt(rAttr.trim());
+                        if (rowNum > 0) {
+                            hiddenRows.add(rowNum - 1);
+                        }
+                    } catch (NumberFormatException e) {
+                        // 忽略无效的行号
+                    }
+                }
+            }
+        }
+
+        /**
+         * 处理 {@code <col>} 元素。若 hidden 属性为 "1" 或 "true"，将 min~max 范围内的列标记为隐藏。
+         * 后出现的 {@code <col>} 元素会覆盖同列的先前设置（XLSX 覆盖语义）。
+         */
+        private void handleColStart(Attributes attributes) {
+            String hiddenAttr = attributes.getValue(ATTR_HIDDEN);
+            String minStr = attributes.getValue(ATTR_MIN);
+            String maxStr = attributes.getValue(ATTR_MAX);
+            if (minStr == null || maxStr == null) {
+                return;
+            }
+            int min;
+            int max;
+            try {
+                min = Integer.parseInt(minStr.trim());
+                max = Integer.parseInt(maxStr.trim());
+            } catch (NumberFormatException e) {
+                return;
+            }
+            if (min <= 0 || max <= 0 || min > max) {
+                return;
+            }
+            boolean isHidden = isHiddenValue(hiddenAttr);
+            for (int col = min - 1; col <= max - 1; col++) {
+                colHiddenState.put(col, isHidden);
+            }
+        }
+
+        /**
+         * 判断属性值是否表示隐藏状态（"1" 或 "true"）。
+         */
+        private static boolean isHiddenValue(String value) {
+            return HIDDEN_VALUE.equals(value) || HIDDEN_VALUE_TRUE.equals(value);
         }
 
         /**
