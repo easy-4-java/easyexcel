@@ -69,6 +69,7 @@ public final class XlsxToMarkdownConverter {
     private static final char UTF8_BOM = '\uFEFF';
     private static final String IMAGE_PLACEHOLDER = "[image]";
     private static final String CELL_KEY_SEPARATOR = ":";
+    private static final int MIN_HEAD_ROWS = 1;
 
     private XlsxToMarkdownConverter() {}
 
@@ -90,6 +91,41 @@ public final class XlsxToMarkdownConverter {
             document.sheets.add(loadCsv(file));
         } else {
             document.sheets.addAll(loadExcel(file, null));
+        }
+        return document;
+    }
+
+    /**
+     * Read the whole workbook and keep every sheet as a {@link SheetTable}, using the specified
+     * number of header rows per sheet. When {@code headRowNumber} is 1 the result is identical to
+     * {@link #toStructured(File)}. For {@code headRowNumber >= 2}, the first N rows of each sheet
+     * are promoted to multi-row headers (flattened with spaces when rendering to Markdown), and
+     * the remaining rows become data rows.
+     *
+     * @param file
+     *            an XLSX, XLS or CSV file
+     * @param headRowNumber
+     *            number of rows to use as header rows (&ge; 1); CSV always uses a single header
+     *            row regardless of this parameter
+     * @return the structured document, never {@code null}
+     * @throws IllegalArgumentException
+     *             if {@code headRowNumber} is less than 1
+     */
+    public static SheetDocument toStructured(File file, int headRowNumber) {
+        Objects.requireNonNull(file, "file must not be null");
+        if (headRowNumber < MIN_HEAD_ROWS) {
+            throw new IllegalArgumentException(
+                "headRowNumber must be >= " + MIN_HEAD_ROWS + ", got " + headRowNumber);
+        }
+        if (!file.isFile()) {
+            throw new ExcelAnalysisException("File not found: " + file.getAbsolutePath());
+        }
+        SheetDocument document = new SheetDocument();
+        document.title = file.getName();
+        if (file.getName().toLowerCase(Locale.ROOT).endsWith(CSV_SUFFIX)) {
+            document.sheets.add(loadCsv(file));
+        } else {
+            document.sheets.addAll(loadExcel(file, null, headRowNumber));
         }
         return document;
     }
@@ -131,6 +167,20 @@ public final class XlsxToMarkdownConverter {
      */
     public static String toMarkdown(File file) {
         return toStructured(file).toMarkdown();
+    }
+
+    /**
+     * Convert the workbook to a multi-sheet Markdown document, using the specified number of
+     * header rows per sheet.
+     *
+     * @param file
+     *            an XLSX, XLS or CSV file
+     * @param headRowNumber
+     *            number of rows to use as header rows (&ge; 1)
+     * @return the Markdown output, never {@code null}
+     */
+    public static String toMarkdown(File file, int headRowNumber) {
+        return toStructured(file, headRowNumber).toMarkdown();
     }
 
     /**
@@ -268,6 +318,10 @@ public final class XlsxToMarkdownConverter {
     }
 
     private static List<SheetTable> loadExcel(File file, InputStream inputStream) {
+        return loadExcel(file, inputStream, MIN_HEAD_ROWS);
+    }
+
+    private static List<SheetTable> loadExcel(File file, InputStream inputStream, int headRowNumber) {
         // TreeMap keeps the deterministic workbook order by sheet number.
         final Map<Integer, SheetTable> sheetMap = new TreeMap<>();
         final Map<Integer, List<int[]>> mergeMap = new HashMap<>(16);
@@ -297,11 +351,11 @@ public final class XlsxToMarkdownConverter {
         for (Map.Entry<Integer, SheetTable> entry : sheetMap.entrySet()) {
             SheetTable table = entry.getValue();
             normalizeWidth(table);
-            applyMergedRegions(table, mergeMap.get(entry.getKey()));
+            applyMergedRegions(table, mergeMap.get(entry.getKey()), headRowNumber);
             applyCellExtras(table, hyperlinkMap.get(entry.getKey()), commentMap.get(entry.getKey()));
             applyImagePlaceholders(table, pictureAnchors.get(entry.getKey()));
             trimTrailingEmptyRows(table);
-            promoteFirstRowToHeader(table);
+            promoteRowsToHeader(table, headRowNumber);
             applyCellStyles(table, cellStyles.get(entry.getKey()));
             applyColumnAlignments(table, cellStyles.get(entry.getKey()));
             tables.add(table);
@@ -452,6 +506,16 @@ public final class XlsxToMarkdownConverter {
      * Markdown table still shows the merged content on each covered position.
      */
     private static void applyMergedRegions(SheetTable table, List<int[]> regions) {
+        applyMergedRegions(table, regions, MIN_HEAD_ROWS);
+    }
+
+    /**
+     * Fill every cell of a merged region with the value of its top-left cell. When
+     * {@code headerRowCount} is greater than 1, cells that fall entirely within the header row
+     * range (rows 0..headerRowCount-1) are <em>not</em> filled, so that multi-row header
+     * flattening produces clean results without duplicate values from vertical merges.
+     */
+    private static void applyMergedRegions(SheetTable table, List<int[]> regions, int headerRowCount) {
         if (regions == null || regions.isEmpty() || table.rows.isEmpty()) {
             return;
         }
@@ -471,7 +535,13 @@ public final class XlsxToMarkdownConverter {
             if (value == null || value.isEmpty()) {
                 continue;
             }
-            for (int rowIndex = firstRow; rowIndex <= lastRow && rowIndex < table.rows.size(); rowIndex++) {
+            // For multi-row headers, skip merged cells that fall within header rows so that
+            // flattenedHeaders() does not produce "X X" from a vertical merge of "X".
+            int fillStartRow = firstRow;
+            if (headerRowCount > MIN_HEAD_ROWS && firstRow < headerRowCount) {
+                fillStartRow = headerRowCount;
+            }
+            for (int rowIndex = fillStartRow; rowIndex <= lastRow && rowIndex < table.rows.size(); rowIndex++) {
                 for (int columnIndex = firstColumn; columnIndex <= lastColumn && columnIndex < width;
                     columnIndex++) {
                     table.rows.get(rowIndex).set(columnIndex, value);
@@ -555,8 +625,16 @@ public final class XlsxToMarkdownConverter {
     /**
      * Wrap a value with inline Markdown font markers. Combination order:
      * strike wraps bold wraps italic wraps value.
+     * <p>
+     * When the style carries rich text {@link CellStyle#runs}, per-segment wrapping is used
+     * instead of whole-cell wrapping. Adjacent segments with identical flags are merged so
+     * that uniform formatting across the entire cell produces the same output as whole-cell
+     * wrapping (e.g. {@code **ab**} rather than {@code **a****b**}).
      */
     static String wrapWithFontMarkers(String value, CellStyle style) {
+        if (style.runs != null && !style.runs.isEmpty()) {
+            return wrapWithRichTextRuns(value, style.runs);
+        }
         if (style.italic) {
             value = "*" + value + "*";
         }
@@ -567,6 +645,61 @@ public final class XlsxToMarkdownConverter {
             value = "~~" + value + "~~";
         }
         return value;
+    }
+
+    /**
+     * Wrap a rich text value by its per-run style segments. Adjacent runs with identical
+     * flags are merged before wrapping so that uniform formatting produces a single wrapped
+     * span rather than adjacent identical spans. Runs are clamped to the value length to
+     * guard against offset drift.
+     */
+    private static String wrapWithRichTextRuns(String value,
+        List<CellStyle.RunStyle> runs) {
+        int textLen = value.length();
+        if (textLen == 0 || runs.isEmpty()) {
+            return value;
+        }
+
+        // Build merged segments: adjacent runs with identical flags are coalesced.
+        List<int[]> offsets = new ArrayList<>();
+        List<boolean[]> flags = new ArrayList<>();
+        for (int i = 0; i < runs.size(); i++) {
+            CellStyle.RunStyle run = runs.get(i);
+            int start = Math.min(run.start, textLen);
+            int end = Math.min(run.end, textLen);
+            if (start >= end) {
+                continue;
+            }
+            if (!flags.isEmpty()) {
+                boolean[] prev = flags.get(flags.size() - 1);
+                if (prev[0] == run.bold && prev[1] == run.italic && prev[2] == run.strikeout) {
+                    // Merge with previous segment: extend its end offset.
+                    offsets.get(offsets.size() - 1)[1] = end;
+                    continue;
+                }
+            }
+            offsets.add(new int[] {start, end});
+            flags.add(new boolean[] {run.bold, run.italic, run.strikeout});
+        }
+
+        // Wrap each merged segment and concatenate.
+        StringBuilder sb = new StringBuilder(textLen);
+        for (int i = 0; i < offsets.size(); i++) {
+            int[] off = offsets.get(i);
+            boolean[] f = flags.get(i);
+            String segment = value.substring(off[0], off[1]);
+            if (f[1]) {
+                segment = "*" + segment + "*";
+            }
+            if (f[0]) {
+                segment = "**" + segment + "**";
+            }
+            if (f[2]) {
+                segment = "~~" + segment + "~~";
+            }
+            sb.append(segment);
+        }
+        return sb.toString();
     }
 
     /**
@@ -620,6 +753,16 @@ public final class XlsxToMarkdownConverter {
         if (!table.rows.isEmpty()) {
             table.headers.add(table.rows.remove(0));
         }
+    }
+
+    /**
+     * Move the first {@code headRowNumber} rows from {@code rows} to {@code headers}, preserving
+     * their order. If fewer rows are available, all rows become headers.
+     */
+    private static void promoteRowsToHeader(SheetTable table, int headRowNumber) {
+        int count = Math.min(headRowNumber, table.rows.size());
+        table.headers.addAll(table.rows.subList(0, count));
+        table.rows.subList(0, count).clear();
     }
 
     private static String cell(List<List<String>> rows, int rowIndex, int columnIndex) {

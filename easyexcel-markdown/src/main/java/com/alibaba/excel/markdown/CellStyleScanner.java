@@ -16,6 +16,7 @@ import javax.xml.parsers.SAXParserFactory;
 
 import org.apache.poi.hssf.usermodel.HSSFCell;
 import org.apache.poi.hssf.usermodel.HSSFFont;
+import org.apache.poi.hssf.usermodel.HSSFRichTextString;
 import org.apache.poi.hssf.usermodel.HSSFRow;
 import org.apache.poi.hssf.usermodel.HSSFSheet;
 import org.apache.poi.hssf.usermodel.HSSFWorkbook;
@@ -24,6 +25,11 @@ import org.apache.poi.openxml4j.opc.PackageAccess;
 import org.apache.poi.ss.usermodel.HorizontalAlignment;
 import org.apache.poi.ss.util.CellReference;
 import org.apache.poi.xssf.eventusermodel.XSSFReader;
+import org.apache.poi.xssf.model.SharedStrings;
+import org.apache.poi.xssf.usermodel.XSSFRichTextString;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTRElt;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTRPrElt;
+import org.openxmlformats.schemas.spreadsheetml.x2006.main.CTRst;
 import org.xml.sax.Attributes;
 import org.xml.sax.InputSource;
 import org.xml.sax.XMLReader;
@@ -35,6 +41,13 @@ import org.xml.sax.helpers.DefaultHandler;
  * <p>
  * Only cells whose styles are non-plain (i.e.&nbsp;carry at least one Markdown-representable
  * formatting attribute) are collected, keeping the map small for typical workbooks.
+ * <p>
+ * Rich text support: XLSX shared strings with run-level formatting (partial bold, etc.) are
+ * parsed from the {@code sharedStrings.xml} via {@link XSSFReader#getSharedStringsTable()}.
+ * Each shared string's {@link XSSFRichTextString} runs are inspected for bold/italic/strikeout
+ * flags via the {@link CTRPrElt} XML bean API. Cells referencing such shared strings receive a
+ * {@link CellStyle} whose {@link CellStyle#runs} list carries per-segment styling. Legacy XLS
+ * rich text is extracted via {@link HSSFRichTextString#numFormattingRuns()}.
  *
  * @author wandl
  */
@@ -76,6 +89,8 @@ final class CellStyleScanner {
 
     /**
      * Scan XLSX cell styles in a streaming fashion (SAX over styles.xml and each sheet).
+     * Also parses sharedStrings.xml to extract rich text run-level formatting for cells
+     * that reference shared strings with mixed formatting (e.g. partial bold).
      *
      * @param file
      *            an XLSX file (ZIP-based)
@@ -110,13 +125,17 @@ final class CellStyleScanner {
                 horizontals = Collections.emptyList();
             }
 
-            // 2. For each sheet, SAX-parse the sheet XML to collect non-plain cells.
+            // 2. Parse sharedStrings.xml for rich text run-level formatting.
+            List<List<CellStyle.RunStyle>> sharedStringRuns = parseSharedStringRuns(reader);
+
+            // 3. For each sheet, SAX-parse the sheet XML to collect non-plain cells.
             XSSFReader.SheetIterator sheets = (XSSFReader.SheetIterator) reader.getSheetsData();
             int sheetIndex = 0;
             while (sheets.hasNext()) {
                 InputStream sheetStream = sheets.next();
                 try {
-                    Map<String, CellStyle> sheetStyles = parseSheetStyles(sheetStream, fonts, fontIds, horizontals);
+                    Map<String, CellStyle> sheetStyles = parseSheetStyles(
+                        sheetStream, fonts, fontIds, horizontals, sharedStringRuns);
                     if (!sheetStyles.isEmpty()) {
                         result.put(sheetIndex, sheetStyles);
                     }
@@ -144,6 +163,12 @@ final class CellStyleScanner {
     /**
      * Scan legacy XLS cell styles by loading the workbook into memory and enumerating every cell.
      * Acceptable because XLS is capped at 65536 rows x 256 columns.
+     * <p>
+     * Rich text run extraction: cells with {@link HSSFRichTextString} that carry multiple
+     * formatting runs are detected and their per-run bold/italic/strikeout flags are extracted
+     * via {@link HSSFRichTextString#numFormattingRuns()},
+     * {@link HSSFRichTextString#getIndexOfFormattingRun(int)} and
+     * {@link HSSFFont#getBold()} / {@link HSSFFont#getItalic()} / {@link HSSFFont#getStrikeout()}.
      *
      * @param file
      *            an XLS file (OLE2-based)
@@ -185,28 +210,92 @@ final class CellStyleScanner {
 
     /**
      * Read the style of a single HSSF cell and build a {@link CellStyle} if the cell has any
-     * non-default formatting.
+     * non-default formatting. Rich text cells with mixed run formatting are detected and their
+     * per-run styles are populated in {@link CellStyle#runs}.
      */
     private static CellStyle readHssfCellStyle(HSSFCell cell, HSSFWorkbook workbook) {
+        // Check for rich text run-level formatting first.
+        List<CellStyle.RunStyle> runs = extractHssfRichTextRuns(cell, workbook);
+
         org.apache.poi.ss.usermodel.CellStyle poiStyle = cell.getCellStyle();
         if (poiStyle == null) {
-            return null;
+            return runs != null ? buildRichTextOnlyStyle(runs) : null;
         }
         HSSFFont font = workbook.getFontAt(poiStyle.getFontIndex());
         boolean hasFont = font.getBold() || font.getItalic() || font.getStrikeout();
         HorizontalAlignment align = poiStyle.getAlignment();
         boolean hasAlign = align != null && align != HorizontalAlignment.GENERAL;
-        if (!hasFont && !hasAlign) {
+        if (!hasFont && !hasAlign && runs == null) {
             return null;
         }
         CellStyle style = new CellStyle();
-        style.bold = font.getBold();
-        style.italic = font.getItalic();
-        style.strikeout = font.getStrikeout();
+        if (runs != null) {
+            // Rich text: run-level flags take precedence over cell-level font flags.
+            style.runs = runs;
+        } else {
+            style.bold = font.getBold();
+            style.italic = font.getItalic();
+            style.strikeout = font.getStrikeout();
+        }
         if (hasAlign) {
             style.horizontal = align.name().toLowerCase(Locale.ROOT);
         }
         return style;
+    }
+
+    /**
+     * Build a CellStyle that carries only horizontal alignment (if any) and no font flags,
+     * used when a cell has rich text runs but no cell-level font formatting.
+     */
+    private static CellStyle buildRichTextOnlyStyle(List<CellStyle.RunStyle> runs) {
+        CellStyle style = new CellStyle();
+        style.runs = runs;
+        return style;
+    }
+
+    /**
+     * Extract rich text run-level formatting from an HSSF cell. Returns a non-empty list of
+     * {@link CellStyle.RunStyle} if the cell contains a rich text string with at least one
+     * formatting run that carries bold/italic/strikeout. Returns {@code null} if the cell does
+     * not contain rich text or if no run has Markdown-representable formatting.
+     */
+    private static List<CellStyle.RunStyle> extractHssfRichTextRuns(HSSFCell cell,
+        HSSFWorkbook workbook) {
+        if (cell.getCellType() != org.apache.poi.ss.usermodel.CellType.STRING) {
+            return null;
+        }
+        org.apache.poi.ss.usermodel.RichTextString rts = cell.getRichStringCellValue();
+        if (!(rts instanceof HSSFRichTextString)) {
+            return null;
+        }
+        HSSFRichTextString richText = (HSSFRichTextString) rts;
+        int runCount = richText.numFormattingRuns();
+        if (runCount <= 0) {
+            return null;
+        }
+        String text = richText.getString();
+        int textLen = text.length();
+        List<CellStyle.RunStyle> runs = new ArrayList<>(runCount);
+        boolean anyFormatted = false;
+        for (int i = 0; i < runCount; i++) {
+            int start = richText.getIndexOfFormattingRun(i);
+            int end = (i + 1 < runCount) ? richText.getIndexOfFormattingRun(i + 1) : textLen;
+            short fontIdx = richText.getFontOfFormattingRun(i);
+            boolean bold = false;
+            boolean italic = false;
+            boolean strikeout = false;
+            if (fontIdx != HSSFRichTextString.NO_FONT) {
+                HSSFFont runFont = workbook.getFontAt(fontIdx);
+                bold = runFont.getBold();
+                italic = runFont.getItalic();
+                strikeout = runFont.getStrikeout();
+            }
+            if (bold || italic || strikeout) {
+                anyFormatted = true;
+            }
+            runs.add(new CellStyle.RunStyle(start, end, bold, italic, strikeout));
+        }
+        return anyFormatted ? runs : null;
     }
 
     // -------------------------------------------------------------------------
@@ -335,14 +424,105 @@ final class CellStyleScanner {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // XLSX sharedStrings rich text run parsing
+    // -------------------------------------------------------------------------
+
+    /**
+     * Parse the shared strings table from the XLSX package and extract run-level formatting
+     * for each shared string that contains rich text. Uses {@link XSSFReader#getSharedStringsTable()}
+     * and the {@link XSSFRichTextString} API to iterate over formatting runs.
+     * <p>
+     * Returns a list indexed by shared string index. Entries are {@code null} for plain strings
+     * (no run-level formatting) or non-{@code null} lists of {@link CellStyle.RunStyle} for
+     * strings with Markdown-representable rich text formatting.
+     *
+     * @param reader the XSSFReader for the workbook
+     * @return per-shared-string run style lists, never {@code null}
+     */
+    private static List<List<CellStyle.RunStyle>> parseSharedStringRuns(XSSFReader reader) {
+        List<List<CellStyle.RunStyle>> result = new ArrayList<>();
+        try {
+            SharedStrings sst = reader.getSharedStringsTable();
+            if (sst == null) {
+                return result;
+            }
+            int count = sst.getCount();
+            for (int i = 0; i < count; i++) {
+                result.add(extractXssfRichTextRuns(sst.getItemAt(i)));
+            }
+        } catch (Exception e) {
+            // Best effort: if shared strings parsing fails, rich text runs are simply absent
+            // and the converter falls back to cell-level or plain rendering.
+        }
+        return result;
+    }
+
+    /**
+     * Extract run-level formatting from a single shared string's {@link XSSFRichTextString}.
+     * Returns a non-empty list of {@link CellStyle.RunStyle} when the string has at least one
+     * run with bold/italic/strikeout. Returns {@code null} for plain strings.
+     * <p>
+     * Uses the {@link CTRPrElt} XML bean API via {@link XSSFRichTextString#getCTRst()} to
+     * inspect run properties. The {@code <b/>}, {@code <i/>} and {@code <strike/>} elements
+     * are detected by checking whether their respective lists on {@link CTRPrElt} are non-empty.
+     */
+    private static List<CellStyle.RunStyle> extractXssfRichTextRuns(
+        org.apache.poi.ss.usermodel.RichTextString rts) {
+        if (!(rts instanceof XSSFRichTextString)) {
+            return null;
+        }
+        XSSFRichTextString xssfRts = (XSSFRichTextString) rts;
+        if (!xssfRts.hasFormatting()) {
+            return null;
+        }
+        CTRst ctRst = xssfRts.getCTRst();
+        List<CTRElt> rList = ctRst.getRList();
+        if (rList.isEmpty()) {
+            return null;
+        }
+        List<CellStyle.RunStyle> runs = new ArrayList<>(rList.size());
+        boolean anyFormatted = false;
+        int offset = 0;
+        for (int i = 0; i < rList.size(); i++) {
+            CTRElt run = rList.get(i);
+            String text = run.getT();
+            int len = (text != null) ? text.length() : 0;
+            boolean bold = false;
+            boolean italic = false;
+            boolean strikeout = false;
+            if (run.isSetRPr()) {
+                CTRPrElt rPr = run.getRPr();
+                bold = !rPr.getBList().isEmpty();
+                italic = !rPr.getIList().isEmpty();
+                strikeout = !rPr.getStrikeList().isEmpty();
+            }
+            if (bold || italic || strikeout) {
+                anyFormatted = true;
+            }
+            runs.add(new CellStyle.RunStyle(offset, offset + len, bold, italic, strikeout));
+            offset += len;
+        }
+        return anyFormatted ? runs : null;
+    }
+
+    // -------------------------------------------------------------------------
+    // Sheet XML parsing
+    // -------------------------------------------------------------------------
+
     /**
      * SAX-parse a sheet XML to collect cells with non-plain styles.
+     * For cells referencing shared strings ({@code t="s"}), rich text run styles are looked
+     * up from the pre-parsed shared string runs list. For other cells, the cellXfs-based
+     * font lookup is used.
      */
     private static Map<String, CellStyle> parseSheetStyles(InputStream sheetStream,
-        List<FontFlags> fonts, List<Integer> fontIds, List<String> horizontals) throws Exception {
+        List<FontFlags> fonts, List<Integer> fontIds, List<String> horizontals,
+        List<List<CellStyle.RunStyle>> sharedStringRuns) throws Exception {
         SAXParser parser = SAX_FACTORY.newSAXParser();
         XMLReader xmlReader = parser.getXMLReader();
-        SheetStyleHandler handler = new SheetStyleHandler(fonts, fontIds, horizontals);
+        SheetStyleHandler handler = new SheetStyleHandler(fonts, fontIds, horizontals,
+            sharedStringRuns);
         xmlReader.setContentHandler(handler);
         xmlReader.parse(new InputSource(sheetStream));
         return handler.result;
@@ -351,29 +531,162 @@ final class CellStyleScanner {
     /**
      * SAX handler for a sheet XML: for each {@code <c>} element, reads the {@code s} attribute
      * to look up the cellXfs entry, then the font, and builds a {@link CellStyle} if non-plain.
+     * <p>
+     * For cells with {@code t="s"} (shared string reference), the {@code <v>} child element
+     * text is captured via {@link #characters(char[], int, int)} to obtain the shared string
+     * index, then rich text run styles are looked up from the pre-parsed list and take
+     * precedence over cell-level font flags.
      */
     private static final class SheetStyleHandler extends DefaultHandler {
         private static final int INITIAL_CAPACITY = 64;
+        private static final String ATTR_TYPE = "t";
+        private static final String TYPE_SHARED_STRING = "s";
+        private static final String EL_V = "v";
 
         private final List<FontFlags> fonts;
         private final List<Integer> fontIds;
         private final List<String> horizontals;
+        private final List<List<CellStyle.RunStyle>> sharedStringRuns;
         private final Map<String, CellStyle> result = new HashMap<>(INITIAL_CAPACITY);
 
-        SheetStyleHandler(List<FontFlags> fonts, List<Integer> fontIds, List<String> horizontals) {
+        /** Set when a {@code <c t="s">} is encountered; cleared on {@code </c>}. */
+        private String pendingSsKey;
+        /** Saved {@code s} attribute from the current {@code <c>} for fallback lookup. */
+        private String pendingStyleIdx;
+        /** True while inside a {@code <v>} child of a shared-string {@code <c>}. */
+        private boolean inV;
+        /** Accumulates characters inside {@code <v>}. */
+        private final StringBuilder vBuffer = new StringBuilder();
+
+        SheetStyleHandler(List<FontFlags> fonts, List<Integer> fontIds,
+            List<String> horizontals, List<List<CellStyle.RunStyle>> sharedStringRuns) {
             this.fonts = fonts;
             this.fontIds = fontIds;
             this.horizontals = horizontals;
+            this.sharedStringRuns = sharedStringRuns;
         }
 
         @Override
         public void startElement(String uri, String localName, String qName, Attributes attributes) {
-            if (!EL_C.equals(localName)) {
-                return;
+            if (EL_C.equals(localName)) {
+                handleCellStart(attributes);
+            } else if (EL_V.equals(localName) && pendingSsKey != null) {
+                inV = true;
+                vBuffer.setLength(0);
             }
+        }
+
+        @Override
+        public void characters(char[] ch, int start, int length) {
+            if (inV) {
+                vBuffer.append(ch, start, length);
+            }
+        }
+
+        @Override
+        public void endElement(String uri, String localName, String qName) {
+            if (EL_V.equals(localName) && inV) {
+                inV = false;
+                resolveSharedString();
+            } else if (EL_C.equals(localName)) {
+                pendingSsKey = null;
+                pendingStyleIdx = null;
+            }
+        }
+
+        /**
+         * Process the start of a {@code <c>} element. If it references a shared string
+         * ({@code t="s"}), the key is stored for deferred resolution when the {@code <v>}
+         * text content arrives. Otherwise, cellXfs-based font lookup is done immediately.
+         */
+        private void handleCellStart(Attributes attributes) {
             String ref = attributes.getValue("r");
             String styleIdx = attributes.getValue("s");
-            if (ref == null || styleIdx == null) {
+            String typeAttr = attributes.getValue(ATTR_TYPE);
+            if (ref == null) {
+                return;
+            }
+
+            CellReference cellRef = new CellReference(ref);
+            String key = cellRef.getRow() + CELL_KEY_SEPARATOR + cellRef.getCol();
+
+            // If this is a shared string cell, defer resolution until <v> text arrives.
+            if (TYPE_SHARED_STRING.equals(typeAttr) && sharedStringRuns != null
+                && !sharedStringRuns.isEmpty()) {
+                pendingSsKey = key;
+                pendingStyleIdx = styleIdx;
+                return;
+            }
+
+            // Otherwise, cellXfs-based font lookup (whole-cell style).
+            applyCellStyle(attributes, key, styleIdx);
+        }
+
+        /**
+         * Resolve the shared string index from the accumulated {@code <v>} text and look up
+         * rich text run styles. If the shared string has run-level formatting, a
+         * {@link CellStyle} with runs is emitted; otherwise, falls back to cellXfs-based
+         * font lookup using the {@code s} attribute saved from {@code <c>}.
+         */
+        private void resolveSharedString() {
+            String key = pendingSsKey;
+            if (key == null) {
+                return;
+            }
+            String vText = vBuffer.toString().trim();
+            if (!vText.isEmpty()) {
+                try {
+                    int ssIndex = Integer.parseInt(vText);
+                    if (ssIndex >= 0 && ssIndex < sharedStringRuns.size()) {
+                        List<CellStyle.RunStyle> runs = sharedStringRuns.get(ssIndex);
+                        if (runs != null && !runs.isEmpty()) {
+                            CellStyle style = new CellStyle();
+                            style.runs = runs;
+                            result.put(key, style);
+                            return;
+                        }
+                    }
+                } catch (NumberFormatException e) {
+                    // fall through to cellXfs-based lookup
+                }
+            }
+            // No rich text runs found; fall back to cellXfs-based font lookup.
+            if (pendingStyleIdx != null) {
+                int xfIndex;
+                try {
+                    xfIndex = Integer.parseInt(pendingStyleIdx.trim());
+                } catch (NumberFormatException e) {
+                    return;
+                }
+                if (xfIndex >= 0 && xfIndex < fontIds.size()) {
+                    int fontId = fontIds.get(xfIndex);
+                    FontFlags flags = (fontId >= 0 && fontId < fonts.size())
+                        ? fonts.get(fontId) : null;
+                    String horizontal = (xfIndex < horizontals.size())
+                        ? horizontals.get(xfIndex) : null;
+                    boolean bold = flags != null && flags.bold;
+                    boolean italic = flags != null && flags.italic;
+                    boolean strikeout = flags != null && flags.strikeout;
+                    boolean hasAlign = horizontal != null
+                        && !HORIZONTAL_GENERAL.equals(horizontal);
+                    if (bold || italic || strikeout || hasAlign) {
+                        CellStyle style = new CellStyle();
+                        style.bold = bold;
+                        style.italic = italic;
+                        style.strikeout = strikeout;
+                        style.horizontal = hasAlign ? horizontal : null;
+                        result.put(key, style);
+                    }
+                }
+            }
+        }
+
+        /**
+         * Apply cellXfs-based font lookup for a non-shared-string cell. Reads the {@code s}
+         * attribute to find the font and alignment, and emits a {@link CellStyle} if non-plain.
+         */
+        private void applyCellStyle(Attributes attributes, String key, String styleIdx) {
+            if (styleIdx == null) {
                 return;
             }
             int xfIndex;
@@ -398,9 +711,6 @@ final class CellStyleScanner {
             if (!bold && !italic && !strikeout && !hasAlign) {
                 return;
             }
-
-            CellReference cellRef = new CellReference(ref);
-            String key = cellRef.getRow() + CELL_KEY_SEPARATOR + cellRef.getCol();
 
             CellStyle style = new CellStyle();
             style.bold = bold;
