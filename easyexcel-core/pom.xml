@@ -4,22 +4,22 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
     <parent>
-        <groupId>com.alibaba</groupId>
+        <groupId>io.github.easy4j</groupId>
         <artifactId>easyexcel-parent</artifactId>
         <version>${revision}</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <url>https://github.com/alibaba/easyexcel</url>
+    <url>https://github.com/easy-4-java/${project.artifactId}</url>
     <packaging>jar</packaging>
     <artifactId>easyexcel-core</artifactId>
     <name>easyexcel-core</name>
 
     <dependencies>
-        <dependency>
-            <groupId>com.alibaba</groupId>
-            <artifactId>easyexcel-support</artifactId>
-        </dependency>
+<dependency>
+                <groupId>com.alibaba</groupId>
+                <artifactId>easyexcel-support</artifactId>
+            </dependency>
         <dependency>
             <groupId>org.apache.poi</groupId>
             <artifactId>poi</artifactId>

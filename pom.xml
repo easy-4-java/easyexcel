@@ -2,13 +2,13 @@
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
-    <groupId>com.alibaba</groupId>
+    <groupId>io.github.easy4j</groupId>
     <artifactId>easyexcel-parent</artifactId>
     <packaging>pom</packaging>
     <version>${revision}</version>
     <name>easyexcel-parent</name>
     <description>easyexcel is a excel handle tools written in Java</description>
-    <url>https://github.com/alibaba/easyexcel</url>
+    <url>https://github.com/easy-4-java/${project.artifactId}</url>
     <inceptionYear>2018</inceptionYear>
 
     <modules>
@@ -30,8 +30,8 @@
     </properties>
 
     <scm>
-        <url>https://github.com/alibaba/easyexcel</url>
-        <connection>scm:git:https://git@github.com/alibaba/easyexcel.git</connection>
+        <url>https://github.com/easy-4-java/${project.artifactId}</url>
+        <connection>scm:git:https://git@github.com/easy-4-java/${project.artifactId}.git</connection>
     </scm>
 
 
@@ -77,13 +77,13 @@
     <dependencyManagement>
         <dependencies>
             <dependency>
-                <groupId>com.alibaba</groupId>
+                <groupId>io.github.easy4j</groupId>
                 <artifactId>easyexcel</artifactId>
                 <version>${revision}</version>
             </dependency>
 
             <dependency>
-                <groupId>com.alibaba</groupId>
+                <groupId>io.github.easy4j</groupId>
                 <artifactId>easyexcel-core</artifactId>
                 <version>${revision}</version>
             </dependency>
