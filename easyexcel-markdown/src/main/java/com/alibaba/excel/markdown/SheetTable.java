@@ -16,6 +16,8 @@ import java.util.List;
  */
 public final class SheetTable {
 
+    private static final String HASH_PREFIX = "#";
+
     /**
      * Sheet name, empty string when unknown.
      */
@@ -46,7 +48,7 @@ public final class SheetTable {
      */
     public String toMarkdown() {
         StringBuilder builder = new StringBuilder();
-        builder.append("## ").append(sheetName == null ? "" : sheetName).append("\n\n");
+        builder.append("## ").append(escapeSheetName(sheetName)).append("\n\n");
 
         List<String> headerRow = flattenedHeaders();
         List<List<String>> dataRows = this.rows;
@@ -162,5 +164,33 @@ public final class SheetTable {
 
     static String escapeCell(String value) {
         return value.replace("|", "\\|").replace("\r\n", "\n").replace('\r', '\n').replace("\n", "<br>");
+    }
+
+    /**
+     * Sanitize a sheet name for safe use as a Markdown {@code ##} heading.
+     * <p>
+     * The heading {@code ## title} must remain on a single line; embedded newlines or tabs would
+     * break the Markdown structure by splitting the heading into multiple lines. This method:
+     * <ol>
+     *   <li>Collapses all CR/LF/CRLF and TAB characters into a single space.</li>
+     *   <li>Trims leading and trailing whitespace (which includes the spaces introduced above).</li>
+     *   <li>Escapes a leading {@code #} as {@code \#} so that {@code ## #Foo} renders as a
+     *       heading containing literal {@code #Foo} rather than being interpreted as a nested
+     *       ATX heading.</li>
+     * </ol>
+     *
+     * @param sheetName the raw sheet name, may be {@code null}
+     * @return a safe, single-line sheet name (empty string when input is {@code null} or blank)
+     */
+    static String escapeSheetName(String sheetName) {
+        if (sheetName == null) {
+            return "";
+        }
+        String collapsed = sheetName.replace("\r\n", " ").replace('\r', ' ').replace('\n', ' ')
+            .replace('\t', ' ').trim();
+        if (collapsed.startsWith(HASH_PREFIX)) {
+            collapsed = "\\" + collapsed;
+        }
+        return collapsed;
     }
 }

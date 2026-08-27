@@ -47,6 +47,11 @@ import com.alibaba.excel.util.FileUtils;
  * reported through {@link CellExtraTypeEnum#MERGE} are filled with the top-left value before
  * rendering, and CSV input is parsed with Apache Commons CSV.
  * <p>
+ * Hidden rows and columns: the underlying easyexcel-core SAX read path does not inspect the
+ * {@code hidden} attribute on {@code <row>} or {@code <col>} XML elements. As a result, hidden
+ * rows and columns are included in the Markdown output as if they were visible. This is the
+ * documented, intentional behavior -- no filtering is applied.
+ * <p>
  * Picture placeholders: XLSX and legacy XLS drawings are scanned so that cells carrying an
  * anchored picture render as {@code [image]}. The {@link InputStream} overloads spool the stream
      * to a temporary file for XLSX/XLS content to enable picture scanning and for CSV content to
