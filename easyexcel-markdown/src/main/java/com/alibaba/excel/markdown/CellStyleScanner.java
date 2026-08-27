@@ -22,8 +22,10 @@ import org.apache.poi.hssf.usermodel.HSSFRichTextString;
 import org.apache.poi.hssf.usermodel.HSSFRow;
 import org.apache.poi.hssf.usermodel.HSSFSheet;
 import org.apache.poi.hssf.usermodel.HSSFWorkbook;
+import org.apache.poi.hssf.util.HSSFColor;
 import org.apache.poi.openxml4j.opc.OPCPackage;
 import org.apache.poi.openxml4j.opc.PackageAccess;
+import org.apache.poi.ss.usermodel.FillPatternType;
 import org.apache.poi.ss.usermodel.HorizontalAlignment;
 import org.apache.poi.ss.util.CellReference;
 import org.apache.poi.xssf.eventusermodel.XSSFReader;
@@ -74,8 +76,32 @@ final class CellStyleScanner {
     private static final String EL_XF = "xf";
     /** XML element name for the alignment child of a cell format entry. */
     private static final String EL_ALIGNMENT = "alignment";
+    /** XML element name for the color element inside a font or fill. */
+    private static final String EL_COLOR = "color";
+    /** XML element name for the fills container in styles.xml. */
+    private static final String EL_FILLS = "fills";
+    /** XML element name for a single fill definition in styles.xml. */
+    private static final String EL_FILL = "fill";
+    /** XML element name for the pattern fill element. */
+    private static final String EL_PATTERN_FILL = "patternFill";
+    /** XML element name for the foreground color element. */
+    private static final String EL_FG_COLOR = "fgColor";
+    /** XML attribute name for the rgb color value. */
+    private static final String ATTR_RGB = "rgb";
+    /** XML attribute name for the theme index. */
+    private static final String ATTR_THEME = "theme";
+    /** XML attribute name for the pattern type. */
+    private static final String ATTR_PATTERN_TYPE = "patternType";
+    /** Pattern type value indicating no fill. */
+    private static final String PATTERN_TYPE_NONE = "none";
     /** XML element name for a cell element in a sheet XML. */
     private static final String EL_C = "c";
+    /** RGB 三元组长度常量。 */
+    private static final int RGB_TRIPLET_LENGTH = 3;
+    /** POI XML 中 8 位 hex 颜色长度（含 alpha 前缀）。 */
+    private static final int HEX_COLOR_LENGTH_8 = 8;
+    /** RGB hex 颜色长度（不含 alpha）。 */
+    private static final int RGB_HEX_LENGTH = 6;
 
     /**
      * Shared SAX parser factory, thread-safe and reused across all style scans.
@@ -178,10 +204,12 @@ final class CellStyleScanner {
         Map<Integer, Map<String, CellStyle>> styles = new HashMap<>(16);
         Map<Integer, HiddenInfo> hiddenInfo = new HashMap<>(16);
         try {
-            // 1. Parse styles.xml to build font and cellXfs lookup lists.
+            // 1. Parse styles.xml to build font, fill and cellXfs lookup lists.
             List<FontFlags> fonts;
             List<Integer> fontIds;
             List<String> horizontals;
+            List<FillInfo> fills;
+            List<Integer> fillIds;
             InputStream stylesStream = reader.getStylesData();
             if (stylesStream != null) {
                 try {
@@ -189,6 +217,8 @@ final class CellStyleScanner {
                     fonts = info.fonts;
                     fontIds = info.fontIds;
                     horizontals = info.horizontals;
+                    fills = info.fills;
+                    fillIds = info.fillIds;
                 } finally {
                     stylesStream.close();
                 }
@@ -196,6 +226,8 @@ final class CellStyleScanner {
                 fonts = Collections.emptyList();
                 fontIds = Collections.emptyList();
                 horizontals = Collections.emptyList();
+                fills = Collections.emptyList();
+                fillIds = Collections.emptyList();
             }
 
             // 2. Parse sharedStrings.xml for rich text run-level formatting.
@@ -208,7 +240,7 @@ final class CellStyleScanner {
                 InputStream sheetStream = sheets.next();
                 try {
                     SheetParseResult sheetResult = parseSheetStyles(
-                        sheetStream, fonts, fontIds, horizontals, sharedStringRuns);
+                        sheetStream, fonts, fontIds, horizontals, fills, fillIds, sharedStringRuns);
                     if (!sheetResult.styles.isEmpty()) {
                         styles.put(sheetIndex, sheetResult.styles);
                     }
@@ -316,7 +348,15 @@ final class CellStyleScanner {
         boolean hasFont = font.getBold() || font.getItalic() || font.getStrikeout();
         HorizontalAlignment align = poiStyle.getAlignment();
         boolean hasAlign = align != null && align != HorizontalAlignment.GENERAL;
-        if (!hasFont && !hasAlign && runs == null) {
+        // 字体色：从 palette 索引解析
+        String fontColorHex = extractHssfFontColorHex(font, workbook);
+        // 背景色：仅当 patternType 非 NO_FILL 时解析
+        String bgHex = null;
+        if (poiStyle.getFillPattern() != FillPatternType.NO_FILL) {
+            bgHex = toColorHex(poiStyle.getFillForegroundColorColor(), workbook);
+        }
+        boolean hasColor = fontColorHex != null || bgHex != null;
+        if (!hasFont && !hasAlign && !hasColor && runs == null) {
             return null;
         }
         CellStyle style = new CellStyle();
@@ -331,6 +371,8 @@ final class CellStyleScanner {
         if (hasAlign) {
             style.horizontal = align.name().toLowerCase(Locale.ROOT);
         }
+        style.fontColorHex = fontColorHex;
+        style.backgroundColorHex = bgHex;
         return style;
     }
 
@@ -342,6 +384,47 @@ final class CellStyleScanner {
         CellStyle style = new CellStyle();
         style.runs = runs;
         return style;
+    }
+
+    /**
+     * 从 HSSFFont 提取字体色 RGB hex。
+     * 通过 palette 索引查找颜色，若索引无效返回 {@code null}。
+     */
+    private static String extractHssfFontColorHex(HSSFFont font, HSSFWorkbook workbook) {
+        short colorIndex = font.getColor();
+        if (colorIndex == HSSFFont.COLOR_NORMAL) {
+            return null;
+        }
+        HSSFColor hssfColor = workbook.getCustomPalette().getColor(colorIndex);
+        return toRgbHex(hssfColor);
+    }
+
+    /**
+     * 将 POI {@link org.apache.poi.ss.usermodel.Color} 转换为 RGB hex。
+     * 仅支持 {@link HSSFColor} 实例，其他类型返回 {@code null}。
+     */
+    private static String toColorHex(org.apache.poi.ss.usermodel.Color color,
+                                     HSSFWorkbook workbook) {
+        if (color instanceof HSSFColor) {
+            return toRgbHex((HSSFColor) color);
+        }
+        return null;
+    }
+
+    /**
+     * 将 {@link HSSFColor} 转换为 {@code #RRGGBB} 格式的 hex 字符串。
+     * 若 triplet 不可用返回 {@code null}。
+     */
+    private static String toRgbHex(HSSFColor hssfColor) {
+        if (hssfColor == null) {
+            return null;
+        }
+        short[] triplet = hssfColor.getTriplet();
+        if (triplet == null || triplet.length < RGB_TRIPLET_LENGTH) {
+            return null;
+        }
+        return String.format(Locale.ROOT, "#%02X%02X%02X",
+            triplet[0] & 0xFF, triplet[1] & 0xFF, triplet[2] & 0xFF);
     }
 
     /**
@@ -394,17 +477,24 @@ final class CellStyleScanner {
     // -------------------------------------------------------------------------
 
     /**
-     * Intermediate container for the two parallel lists extracted from styles.xml.
+     * Intermediate container for the parallel lists extracted from styles.xml.
      */
     private static final class StylesInfo {
         final List<FontFlags> fonts;
         final List<Integer> fontIds;
         final List<String> horizontals;
+        /** fills 列表，索引对应 styles.xml 中 fill 定义顺序。 */
+        final List<FillInfo> fills;
+        /** cellXfs 中每个条目对应的 fillId 列表。 */
+        final List<Integer> fillIds;
 
-        StylesInfo(List<FontFlags> fonts, List<Integer> fontIds, List<String> horizontals) {
+        StylesInfo(List<FontFlags> fonts, List<Integer> fontIds, List<String> horizontals,
+                   List<FillInfo> fills, List<Integer> fillIds) {
             this.fonts = fonts;
             this.fontIds = fontIds;
             this.horizontals = horizontals;
+            this.fills = fills;
+            this.fillIds = fillIds;
         }
     }
 
@@ -415,10 +505,22 @@ final class CellStyleScanner {
         boolean bold;
         boolean italic;
         boolean strikeout;
+        /** 字体色 RGB hex（格式 {@code #RRGGBB}），主题色不解析返回 {@code null}。 */
+        String colorHex;
     }
 
     /**
-     * Parse styles.xml to extract font flags and cellXfs alignment info.
+     * 单个 fill 定义：patternType + fgColor RGB hex。
+     */
+    private static final class FillInfo {
+        /** patternType 属性值，{@code null} 表示未设置。 */
+        String patternType;
+        /** 前景色 RGB hex（格式 {@code #RRGGBB}），主题色不解析返回 {@code null}。 */
+        String fgColorHex;
+    }
+
+    /**
+     * Parse styles.xml to extract font flags, fill colors and cellXfs alignment info.
      */
     private static StylesInfo parseStyles(InputStream stylesStream) throws Exception {
         SAXParser parser = SAX_FACTORY.newSAXParser();
@@ -426,11 +528,14 @@ final class CellStyleScanner {
         StylesHandler handler = new StylesHandler();
         xmlReader.setContentHandler(handler);
         xmlReader.parse(new InputSource(stylesStream));
-        return new StylesInfo(handler.fonts, handler.fontIds, handler.horizontals);
+        return new StylesInfo(handler.fonts, handler.fontIds, handler.horizontals,
+            handler.fills, handler.fillIds);
     }
 
     /**
-     * SAX handler for {@code /xl/styles.xml}: collects {@code <fonts>} and {@code <cellXfs>}.
+     * SAX handler for {@code /xl/styles.xml}: collects {@code <fonts>}, {@code <fills>} and
+     * {@code <cellXfs>}. Font colors and fill foreground colors are extracted for optional
+     * HTML color rendering.
      */
     private static final class StylesHandler extends DefaultHandler {
         private static final int INITIAL_CAPACITY = 32;
@@ -438,14 +543,21 @@ final class CellStyleScanner {
         private final List<FontFlags> fonts = new ArrayList<>(INITIAL_CAPACITY);
         private final List<Integer> fontIds = new ArrayList<>(INITIAL_CAPACITY);
         private final List<String> horizontals = new ArrayList<>(INITIAL_CAPACITY);
+        private final List<FillInfo> fills = new ArrayList<>(INITIAL_CAPACITY);
+        private final List<Integer> fillIds = new ArrayList<>(INITIAL_CAPACITY);
 
         private boolean inFonts;
         private boolean inCellXfs;
+        private boolean inFills;
         private boolean inFont;
         private boolean inXf;
+        private boolean inFill;
+        private boolean inPatternFill;
         private boolean hasAlignmentChild;
         private FontFlags currentFont;
+        private FillInfo currentFill;
         private int currentFontId;
+        private int currentFillId;
         private boolean currentApplyAlignment;
 
         @Override
@@ -454,9 +566,13 @@ final class CellStyleScanner {
                 inFonts = true;
             } else if (EL_CELL_XFS.equals(localName)) {
                 inCellXfs = true;
+            } else if (EL_FILLS.equals(localName)) {
+                inFills = true;
             } else if (inFonts && EL_FONT.equals(localName)) {
                 inFont = true;
                 currentFont = new FontFlags();
+            } else if (inFont && EL_COLOR.equals(localName)) {
+                currentFont.colorHex = extractColorHex(attributes);
             } else if (inFont) {
                 if (EL_BOLD.equals(localName)) {
                     currentFont.bold = true;
@@ -465,11 +581,21 @@ final class CellStyleScanner {
                 } else if (EL_STRIKE.equals(localName)) {
                     currentFont.strikeout = true;
                 }
+            } else if (inFills && EL_FILL.equals(localName)) {
+                inFill = true;
+                currentFill = new FillInfo();
+            } else if (inFill && EL_PATTERN_FILL.equals(localName)) {
+                inPatternFill = true;
+                currentFill.patternType = attributes.getValue(ATTR_PATTERN_TYPE);
+            } else if (inPatternFill && EL_FG_COLOR.equals(localName)) {
+                currentFill.fgColorHex = extractColorHex(attributes);
             } else if (inCellXfs && EL_XF.equals(localName)) {
                 inXf = true;
                 hasAlignmentChild = false;
                 String fontIdStr = attributes.getValue("fontId");
                 currentFontId = parseInt(fontIdStr);
+                String fillIdStr = attributes.getValue("fillId");
+                currentFillId = parseInt(fillIdStr);
                 String applyAlign = attributes.getValue("applyAlignment");
                 currentApplyAlignment = "1".equals(applyAlign) || "true".equalsIgnoreCase(applyAlign);
             } else if (inXf && EL_ALIGNMENT.equals(localName)) {
@@ -481,6 +607,7 @@ final class CellStyleScanner {
                     horizontals.add(null);
                 }
                 fontIds.add(currentFontId);
+                fillIds.add(currentFillId);
             }
         }
 
@@ -490,17 +617,49 @@ final class CellStyleScanner {
                 inFonts = false;
             } else if (EL_CELL_XFS.equals(localName)) {
                 inCellXfs = false;
+            } else if (EL_FILLS.equals(localName)) {
+                inFills = false;
             } else if (inFonts && EL_FONT.equals(localName)) {
                 fonts.add(currentFont);
                 currentFont = null;
                 inFont = false;
+            } else if (inFill && EL_PATTERN_FILL.equals(localName)) {
+                inPatternFill = false;
+            } else if (inFills && EL_FILL.equals(localName)) {
+                fills.add(currentFill);
+                currentFill = null;
+                inFill = false;
             } else if (inCellXfs && EL_XF.equals(localName)) {
                 if (!hasAlignmentChild) {
                     fontIds.add(currentFontId);
                     horizontals.add(null);
+                    fillIds.add(currentFillId);
                 }
                 inXf = false;
             }
+        }
+
+        /**
+         * 从 {@code <color>} 或 {@code <fgColor>} 元素提取显式 rgb 颜色值。
+         * 主题色（含 {@code theme} 属性）不解析，返回 {@code null}。
+         * POI XML 中 rgb 属性为 8 位 hex（前两位 alpha），取后 6 位。
+         */
+        private static String extractColorHex(Attributes attributes) {
+            if (attributes.getValue(ATTR_THEME) != null) {
+                return null;
+            }
+            String rgb = attributes.getValue(ATTR_RGB);
+            if (rgb == null || rgb.isEmpty()) {
+                return null;
+            }
+            // 8 位 hex：前两位 alpha，后 6 位 RGB
+            if (rgb.length() == HEX_COLOR_LENGTH_8) {
+                rgb = rgb.substring(2);
+            }
+            if (rgb.length() != RGB_HEX_LENGTH) {
+                return null;
+            }
+            return "#" + rgb.toUpperCase(Locale.ROOT);
         }
 
         private static int parseInt(String value) {
@@ -609,11 +768,12 @@ final class CellStyleScanner {
      */
     private static SheetParseResult parseSheetStyles(InputStream sheetStream,
         List<FontFlags> fonts, List<Integer> fontIds, List<String> horizontals,
+        List<FillInfo> fills, List<Integer> fillIds,
         List<List<CellStyle.RunStyle>> sharedStringRuns) throws Exception {
         SAXParser parser = SAX_FACTORY.newSAXParser();
         XMLReader xmlReader = parser.getXMLReader();
         SheetStyleHandler handler = new SheetStyleHandler(fonts, fontIds, horizontals,
-            sharedStringRuns);
+            fills, fillIds, sharedStringRuns);
         xmlReader.setContentHandler(handler);
         xmlReader.parse(new InputSource(sheetStream));
         // 将 colHiddenState 转换为 hiddenCols 集合
@@ -652,6 +812,8 @@ final class CellStyleScanner {
         private final List<FontFlags> fonts;
         private final List<Integer> fontIds;
         private final List<String> horizontals;
+        private final List<FillInfo> fills;
+        private final List<Integer> fillIds;
         private final List<List<CellStyle.RunStyle>> sharedStringRuns;
         private final Map<String, CellStyle> result = new HashMap<>(INITIAL_CAPACITY);
         /** 隐藏行集合，0-based 行索引。 */
@@ -669,10 +831,13 @@ final class CellStyleScanner {
         private final StringBuilder vBuffer = new StringBuilder();
 
         SheetStyleHandler(List<FontFlags> fonts, List<Integer> fontIds,
-            List<String> horizontals, List<List<CellStyle.RunStyle>> sharedStringRuns) {
+            List<String> horizontals, List<FillInfo> fills, List<Integer> fillIds,
+            List<List<CellStyle.RunStyle>> sharedStringRuns) {
             this.fonts = fonts;
             this.fontIds = fontIds;
             this.horizontals = horizontals;
+            this.fills = fills;
+            this.fillIds = fillIds;
             this.sharedStringRuns = sharedStringRuns;
         }
 
@@ -811,6 +976,8 @@ final class CellStyleScanner {
                         if (runs != null && !runs.isEmpty()) {
                             CellStyle style = new CellStyle();
                             style.runs = runs;
+                            // 富文本单元格仍应用整格颜色
+                            applyColorsToStyle(style, pendingStyleIdx);
                             result.put(key, style);
                             return;
                         }
@@ -838,12 +1005,17 @@ final class CellStyleScanner {
                     boolean strikeout = flags != null && flags.strikeout;
                     boolean hasAlign = horizontal != null
                         && !HORIZONTAL_GENERAL.equals(horizontal);
-                    if (bold || italic || strikeout || hasAlign) {
+                    String fontColorHex = (flags != null) ? flags.colorHex : null;
+                    String bgHex = lookupBackgroundColorHex(xfIndex);
+                    boolean hasColor = fontColorHex != null || bgHex != null;
+                    if (bold || italic || strikeout || hasAlign || hasColor) {
                         CellStyle style = new CellStyle();
                         style.bold = bold;
                         style.italic = italic;
                         style.strikeout = strikeout;
                         style.horizontal = hasAlign ? horizontal : null;
+                        style.fontColorHex = fontColorHex;
+                        style.backgroundColorHex = bgHex;
                         result.put(key, style);
                     }
                 }
@@ -876,8 +1048,11 @@ final class CellStyleScanner {
             boolean italic = flags != null && flags.italic;
             boolean strikeout = flags != null && flags.strikeout;
             boolean hasAlign = horizontal != null && !HORIZONTAL_GENERAL.equals(horizontal);
+            String fontColorHex = (flags != null) ? flags.colorHex : null;
+            String bgHex = lookupBackgroundColorHex(xfIndex);
+            boolean hasColor = fontColorHex != null || bgHex != null;
 
-            if (!bold && !italic && !strikeout && !hasAlign) {
+            if (!bold && !italic && !strikeout && !hasAlign && !hasColor) {
                 return;
             }
 
@@ -886,7 +1061,51 @@ final class CellStyleScanner {
             style.italic = italic;
             style.strikeout = strikeout;
             style.horizontal = hasAlign ? horizontal : null;
+            style.fontColorHex = fontColorHex;
+            style.backgroundColorHex = bgHex;
             result.put(key, style);
+        }
+
+        /**
+         * 将颜色字段应用到已有的 CellStyle（用于富文本单元格）。
+         * 从 pendingStyleIdx 查找字体色和背景色。
+         */
+        private void applyColorsToStyle(CellStyle style, String styleIdx) {
+            if (styleIdx == null) {
+                return;
+            }
+            int xfIndex;
+            try {
+                xfIndex = Integer.parseInt(styleIdx.trim());
+            } catch (NumberFormatException e) {
+                return;
+            }
+            if (xfIndex < 0 || xfIndex >= fontIds.size()) {
+                return;
+            }
+            int fontId = fontIds.get(xfIndex);
+            FontFlags flags = (fontId >= 0 && fontId < fonts.size()) ? fonts.get(fontId) : null;
+            style.fontColorHex = (flags != null) ? flags.colorHex : null;
+            style.backgroundColorHex = lookupBackgroundColorHex(xfIndex);
+        }
+
+        /**
+         * 根据 xfIndex 查找背景色 RGB hex。
+         * 仅当 patternType 存在且非 {@code none}，且 fgColor 有显式 rgb 时返回颜色值。
+         */
+        private String lookupBackgroundColorHex(int xfIndex) {
+            if (xfIndex < 0 || xfIndex >= fillIds.size()) {
+                return null;
+            }
+            int fillId = fillIds.get(xfIndex);
+            if (fillId < 0 || fillId >= fills.size()) {
+                return null;
+            }
+            FillInfo fill = fills.get(fillId);
+            if (fill.patternType == null || PATTERN_TYPE_NONE.equals(fill.patternType)) {
+                return null;
+            }
+            return fill.fgColorHex;
         }
     }
 }
