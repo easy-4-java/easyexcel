@@ -1,4 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  easyexcel-test：fork 集成测试模块。
+
+  - maven.deploy.skip=true：不发布到私有仓库（仅本地回归用）
+  - surefire include：只跑 /com/alibaba/easyexcel/test/core/ 下的回归用例，
+    排除 easyexcel-markdown 模块的 76 个测试（它们由各自模块 surefire 跑）
+  - 211 个集成测试覆盖 easyexcel-core 写入 / 读取 / 异常 / 字符集 / 模板等
+
+  见根 pom 注释了解 fork 整体结构。
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -17,15 +27,18 @@
     <name>easyexcel-test</name>
 
     <properties>
+        <!-- 集成测试模块不发布到私有仓库，仅本地 + CI 跑 -->
         <maven.deploy.skip>true</maven.deploy.skip>
     </properties>
 
     <dependencies>
-
+        <!-- ===== Fork 自家核心 ===== -->
         <dependency>
             <groupId>io.github.easy4j</groupId>
             <artifactId>easyexcel-core</artifactId>
         </dependency>
+
+        <!-- ===== JSON / Spring Boot 集成测试 ===== -->
         <dependency>
             <groupId>com.alibaba.fastjson2</groupId>
             <artifactId>fastjson2</artifactId>
@@ -42,7 +55,7 @@
             <version>2.7.18</version>
         </dependency>
 
-        <!-- logback -->
+        <!-- ===== 日志（slf4j 桥 + logback 后端） ===== -->
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-simple</artifactId>

@@ -1,4 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  easyexcel-core：fork 核心模块。
+
+  本模块在 easyexcel 4.0.3 上游源码上运行，理论上与上游源代码一致；
+  本 pom 仅继承根 pom 的 properties、pluginManagement、依赖管理与 plugin 配置。
+
+  子模块依赖：
+  - easyexcel-support（Spring-core 重打包为 com.alibaba.excel.support 命名空间，
+    隔离下游 Spring 版本冲突）
+  - poi + poi-ooxml（OOXML 读写引擎）
+  - commons-csv（CSV 读写）
+  - ehcache（sharedStrings 缓存）
+
+  见根 pom 注释了解 fork 整体结构与 publish 目标仓库。
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
@@ -16,10 +31,13 @@
     <name>easyexcel-core</name>
 
     <dependencies>
+        <!-- ===== Fork 自家支持模块 ===== -->
         <dependency>
             <groupId>io.github.easy4j</groupId>
             <artifactId>easyexcel-support</artifactId>
         </dependency>
+
+        <!-- ===== POI 套件 ===== -->
         <dependency>
             <groupId>org.apache.poi</groupId>
             <artifactId>poi</artifactId>
@@ -28,6 +46,8 @@
             <groupId>org.apache.poi</groupId>
             <artifactId>poi-ooxml</artifactId>
         </dependency>
+
+        <!-- ===== CSV / 缓存 ===== -->
         <dependency>
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-csv</artifactId>

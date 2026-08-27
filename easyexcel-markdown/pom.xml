@@ -1,7 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  easyexcel-markdown：XLSX / XLS / CSV → 多 Sheet Markdown 转换模块。
+
+  本模块仅依赖 easyexcel-core、POI 全家桶与 commons-csv（轻量、无 web 容器）。
+  测试依赖 JUnit 5 + AssertJ；版本号与覆盖由根 pom dependencyManagement 统一锁定。
+
+  见根 pom 注释了解 fork 整体结构与 publish 目标仓库。
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
-         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd"
-         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
@@ -18,10 +26,14 @@
     <description>Convert XLSX / XLS / CSV workbooks to multi-sheet Markdown on top of easyexcel-core</description>
 
     <dependencies>
+        <!-- ===== Fork 自家核心 ===== -->
+        <!-- easyexcel-core：easyexcel 读 + SAX API -->
         <dependency>
             <groupId>io.github.easy4j</groupId>
             <artifactId>easyexcel-core</artifactId>
         </dependency>
+
+        <!-- ===== POI 套件（OOXML + 共享字符串表 + 图片扫描） ===== -->
         <dependency>
             <groupId>org.apache.poi</groupId>
             <artifactId>poi</artifactId>
@@ -30,20 +42,22 @@
             <groupId>org.apache.poi</groupId>
             <artifactId>poi-ooxml</artifactId>
         </dependency>
+
+        <!-- ===== Commons CSV（CSV 路径的两-pass 流式写入） ===== -->
         <dependency>
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-csv</artifactId>
         </dependency>
+
+        <!-- ===== 测试（test scope；版本由根 pom dependencyManagement 锁定） ===== -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>5.10.2</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>
-            <version>3.25.3</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

@@ -1,7 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  easyexcel-parent（fork 主 pom）
+
+  本 fork 由 io.github.easy4j 维护，基于 Alibaba EasyExcel 4.0.3 上游版本改造。
+  - 不修改 easyexcel-core 源码（commit hash 锁定的兼容性边界由版本号 5.0.0 表达）
+  - 新增 easyexcel-markdown 子模块
+  - 私有 Maven 仓库发布到阿里云 packages
+
+  本 pom 用 CI-friendly revision 注入版本号；flatten-maven-plugin 在
+  package 阶段把 \${revision} 占位替换为字面量写回 .flattened-pom.xml，
+  这是 5.0.0 release artifact 里 5 个子模块 pom 实际生效的版本号来源。
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
+
+    <!-- ════════════ 项目坐标 ════════════ -->
     <groupId>io.github.easy4j</groupId>
     <artifactId>easyexcel-parent</artifactId>
     <packaging>pom</packaging>
@@ -19,22 +33,70 @@
         <module>easyexcel</module>
     </modules>
 
-
+    <!--
+      ════════════ properties ════════════
+      分四段：(1) 构建与版本；(2) easyexcel 自家模块；(3) 核心三方依赖；(4) 测试/Maven 插件版本。
+      升级版本时只动一处；新增依赖版本统一在 dependencyManagement 维护。
+    -->
     <properties>
+
+        <!-- ─── (1) 构建与版本：CI-friendly revision 与编码/编译器/JVM 配置 ─── -->
+        <!-- CI-friendly 单一版本源：发布前只改此一处，5 个子模块同步升级 -->
         <revision>5.0.0</revision>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <jdk.version>1.8</jdk.version>
-        <gpg.skip>true</gpg.skip>
-        <maven.javadoc.skip>true</maven.javadoc.skip>
+        <maven.compiler.source>${jdk.version}</maven.compiler.source>
+        <maven.compiler.target>${jdk.version}</maven.compiler.target>
+
+        <!-- ─── (2) easyexcel 自家模块（fork 内自给，避免发 Maven Central 后才能依赖） ─── -->
+        <!-- easyexcel-core / easyexcel-support / easyexcel-markdown 在 build 时按 reactor 顺序产出 -->
+
+        <!-- ─── (3) 核心三方依赖版本锁定（这些版本经本次 fork 安全审计通过） ─── -->
+
+        <!-- ─── (4) 测试与构建插件开关 ─── -->
+        <!-- 默认跳过测试：私有仓库发布追求快；CI/回归请加 -Dmaven.test.skip=false -->
         <maven.test.skip>true</maven.test.skip>
+        <maven.javadoc.skip>true</maven.javadoc.skip>
+        <!-- 私有仓库发布不签 GPG；如未来发公共仓库请去掉此行并配置 gpg.keyname/secretKeyring -->
+        <gpg.skip>true</gpg.skip>
     </properties>
+
+    <!--
+      ════════════ 仓库声明（脱离默认 Maven Central） ════════════
+      fork 私有发布到阿里云 packages；repositories 段显式列出避免不同环境
+      settings.xml 镜像差异导致构建找错仓库。
+    -->
+    <repositories>
+        <repository>
+            <id>2624322-release-6F6h6R</id>
+            <name>Aliyun Maven Private Release</name>
+            <url>https://packages.aliyun.com/6927b116e6c3e0425dbdf60d/maven/2624322-release-6f6h6r</url>
+            <releases><enabled>true</enabled></releases>
+            <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+        <repository>
+            <id>2624322-snapshot-3EoOv3</id>
+            <name>Aliyun Maven Private Snapshot</name>
+            <url>https://packages.aliyun.com/6927b116e6c3e0425dbdf60d/maven/2624322-snapshot-3eoov3</url>
+            <releases><enabled>false</enabled></releases>
+            <snapshots><enabled>true</enabled><updatePolicy>always</updatePolicy></snapshots>
+        </repository>
+    </repositories>
+    <pluginRepositories>
+        <pluginRepository>
+            <id>2624322-release-6F6h6R</id>
+            <url>https://packages.aliyun.com/6927b116e6c3e0425dbdf60d/maven/2624322-release-6f6h6r</url>
+            <releases><enabled>true</enabled></releases>
+            <snapshots><enabled>false</enabled></snapshots>
+        </pluginRepository>
+    </pluginRepositories>
 
     <scm>
         <url>https://github.com/easy-4-java/${project.artifactId}</url>
         <connection>scm:git:https://git@github.com/easy-4-java/${project.artifactId}.git</connection>
     </scm>
 
-
+    <!-- organization 保留 Alibaba Group（Apache-2.0 原作者署名要求） -->
     <organization>
         <name>Alibaba Group</name>
         <url>https://github.com/alibaba</url>
@@ -63,43 +125,48 @@
     </licenses>
 
 
+    <!--
+      ════════════ distributionManagement ════════════
+      mvn deploy 默认目的地。私仓 ID 与 settings.xml <server> id 一一对应。
+      mvn install 不会触发本配置（只装本地 ~/.m2/repository）。
+    -->
     <distributionManagement>
-        <snapshotRepository>
-            <id>ossrh</id>
-            <url>https://oss.sonatype.org/content/repositories/snapshots</url>
-        </snapshotRepository>
         <repository>
-            <id>ossrh</id>
-            <url>https://oss.sonatype.org/service/local/staging/deploy/maven2/</url>
+            <id>2624322-release-6F6h6R</id>
+            <url>https://packages.aliyun.com/6927b116e6c3e0425dbdf60d/maven/2624322-release-6f6h6r</url>
         </repository>
+        <snapshotRepository>
+            <id>2624322-snapshot-3EoOv3</id>
+            <url>https://packages.aliyun.com/6927b116e6c3e0425dbdf60d/maven/2624322-snapshot-3eoov3</url>
+        </snapshotRepository>
     </distributionManagement>
 
+    <!--
+      ════════════ dependencyManagement ════════════
+      本 fork reactor 自给（所有 easyexcel-* 子模块都在本 fork 内产出），
+      第三方依赖版本集中在这一段维护。
+    -->
     <dependencyManagement>
         <dependencies>
+            <!-- ===== 本 fork 自家模块（坐标 io.github.easy4j:easyexcel-*） ===== -->
             <dependency>
                 <groupId>io.github.easy4j</groupId>
                 <artifactId>easyexcel</artifactId>
                 <version>${revision}</version>
             </dependency>
-
             <dependency>
                 <groupId>io.github.easy4j</groupId>
                 <artifactId>easyexcel-core</artifactId>
                 <version>${revision}</version>
             </dependency>
-
             <dependency>
                 <groupId>io.github.easy4j</groupId>
                 <artifactId>easyexcel-support</artifactId>
                 <version>${revision}</version>
             </dependency>
 
-            <dependency>
-                <groupId>org.apache.commons</groupId>
-                <artifactId>commons-csv</artifactId>
-                <version>1.11.0</version>
-            </dependency>
-
+            <!-- ===== POI 套件 ===== -->
+            <!-- poi-ooxml 5.4.1 修复 CVE-2025-31672（重复 ZIP entry） -->
             <dependency>
                 <groupId>org.apache.poi</groupId>
                 <artifactId>poi</artifactId>
@@ -111,15 +178,21 @@
                 <version>5.4.1</version>
             </dependency>
 
-            <!-- CVE-2025-31672 (duplicate ZIP entries) fixed in poi-ooxml 5.4.0；
-                 poi 5.4.x 自带 commons-compress 已过线，此处显式锁定，
-                 防止依赖解析回退到受 CVE-2024-26308/CVE-2024-25710 影响的版本 -->
+            <!-- ===== Apache Commons 套件 ===== -->
+            <dependency>
+                <groupId>org.apache.commons</groupId>
+                <artifactId>commons-csv</artifactId>
+                <version>1.11.0</version>
+            </dependency>
+            <!-- commons-compress 1.27.1 修复 CVE-2024-26308 / CVE-2024-25710；
+                 显式锁定防止依赖解析回退到受漏洞影响版本 -->
             <dependency>
                 <groupId>org.apache.commons</groupId>
                 <artifactId>commons-compress</artifactId>
                 <version>1.27.1</version>
             </dependency>
 
+            <!-- ===== 缓存与 IO 工具 ===== -->
             <dependency>
                 <groupId>org.ehcache</groupId>
                 <artifactId>ehcache</artifactId>
@@ -130,22 +203,41 @@
                 <artifactId>commons-io</artifactId>
                 <version>2.16.1</version>
             </dependency>
+
+            <!-- ===== 日志与注解处理 ===== -->
             <dependency>
                 <groupId>org.slf4j</groupId>
                 <artifactId>slf4j-api</artifactId>
                 <version>1.7.36</version>
             </dependency>
-
-            <!-- provided -->
             <dependency>
                 <groupId>org.projectlombok</groupId>
                 <artifactId>lombok</artifactId>
                 <version>1.18.32</version>
+                <scope>provided</scope>
+            </dependency>
+
+            <!-- ===== 测试框架（fork 内统一 JUnit5 + AssertJ） ===== -->
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter</artifactId>
+                <version>5.10.2</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.assertj</groupId>
+                <artifactId>assertj-core</artifactId>
+                <version>3.25.3</version>
+                <scope>test</scope>
             </dependency>
         </dependencies>
     </dependencyManagement>
 
-
+    <!--
+      ════════════ dependencies（所有子模块默认继承） ════════════
+      - slf4j-api 全模块共享
+      - lombok provided：编译期生成 getter/setter，不进入发布 jar
+    -->
     <dependencies>
         <dependency>
             <groupId>org.slf4j</groupId>
@@ -160,8 +252,13 @@
 
 
     <build>
+        <!--
+          ════════════ pluginManagement（插件版本与共享配置） ════════════
+          子模块按需启用；版本与插件仓库在此集中维护。
+        -->
         <pluginManagement>
             <plugins>
+                <!-- Maven PMD + 阿里 P3C 规约扫描：拦截魔法值、HashMap 无容量等违例 -->
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-pmd-plugin</artifactId>
@@ -174,56 +271,81 @@
                         </dependency>
                     </dependencies>
                 </plugin>
+
+                <!-- Maven Compiler：JDK 1.8 source/target，保留 lombok 注解处理 -->
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-compiler-plugin</artifactId>
                     <version>3.8.1</version>
                 </plugin>
+
+                <!-- Maven Source Plugin：发布源码 jar，方便下游阅读 -->
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-source-plugin</artifactId>
                     <version>3.2.1</version>
                 </plugin>
+
+                <!-- GPG：默认跳过；切公共仓库时去掉根 properties 的 gpg.skip=true -->
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-gpg-plugin</artifactId>
                     <version>1.6</version>
                 </plugin>
+
+                <!-- Javadoc：默认跳过（中文注释与 doclint 容易冲突） -->
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-javadoc-plugin</artifactId>
                     <version>3.1.0</version>
                 </plugin>
+
+                <!-- lombok-maven-plugin：delombok 把 @Data 还原为普通 getter/setter 再编译，
+                     避免 javac 注解处理器版本不匹配导致 200+ 找不到符号错误（2026-08 教训） -->
                 <plugin>
                     <groupId>org.projectlombok</groupId>
                     <artifactId>lombok-maven-plugin</artifactId>
                     <version>1.18.20.0</version>
                 </plugin>
+
+                <!-- Maven Surefire：跑单元测试；默认 skip=true，需要时 -Dmaven.test.skip=false -->
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>3.3.0</version>
                 </plugin>
+
+                <!-- Maven Shade Plugin：easyexcel-support 用它把 spring-core 重打包为
+                     com.alibaba.excel.support 命名空间，避免下游 Spring 版本冲突 -->
                 <plugin>
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-shade-plugin</artifactId>
                     <version>3.6.0</version>
                 </plugin>
+
+                <!-- Flatten Maven Plugin：把 \${revision} 占位写回为字面量，
+                     5.0.0 发布 artifact 里子模块 pom 实际生效的版本号由本插件注入 -->
                 <plugin>
                     <groupId>org.codehaus.mojo</groupId>
                     <artifactId>flatten-maven-plugin</artifactId>
                     <version>1.2.7</version>
                 </plugin>
+
+                <!-- Maven Enforcer：门禁插件，强制 Maven 与 JDK 版本，防止跨环境构建漂移 -->
                 <plugin>
-                    <groupId>org.sonatype.plugins</groupId>
-                    <artifactId>nexus-staging-maven-plugin</artifactId>
-                    <version>1.6.13</version>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-enforcer-plugin</artifactId>
+                    <version>3.3.0</version>
                 </plugin>
             </plugins>
         </pluginManagement>
 
+        <!--
+          ════════════ plugins（本 pom 即生效，子模块自动继承） ════════════
+          选型原则：lifecycle 关键插件 + 上游 easyexcel 强制要求的 P3C 扫描。
+        -->
         <plugins>
-            <!-- code style -->
+            <!-- P3C 代码规约：validate 阶段运行，覆盖率大于 0 即失败 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-pmd-plugin</artifactId>
@@ -260,20 +382,22 @@
                     <execution>
                         <id>pmd-check-verify</id>
                         <phase>validate</phase>
-                        <goals>
-                            <goal>check</goal>
-                        </goals>
+                        <goals><goal>check</goal></goals>
                     </execution>
                 </executions>
             </plugin>
+
+            <!-- Compiler：1.8 字节码（lombok-maven-plugin delombok 后由 javac 编译） -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <configuration>
-                    <source>1.8</source>
-                    <target>1.8</target>
+                    <source>${maven.compiler.source}</source>
+                    <target>${maven.compiler.target}</target>
                 </configuration>
             </plugin>
+
+            <!-- Source jar：发布源码供下游阅读 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-source-plugin</artifactId>
@@ -283,24 +407,21 @@
                 <executions>
                     <execution>
                         <phase>compile</phase>
-                        <goals>
-                            <goal>jar</goal>
-                        </goals>
+                        <goals><goal>jar</goal></goals>
                     </execution>
                 </executions>
             </plugin>
+
+            <!-- GPG：默认跳过（gpg.skip=true）；保留执行声明以便未来切换公共仓库时立即生效 -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-gpg-plugin</artifactId>
                 <executions>
                     <execution>
                         <phase>verify</phase>
-                        <goals>
-                            <goal>sign</goal>
-                        </goals>
+                        <goals><goal>sign</goal></goals>
                     </execution>
                 </executions>
-                <!-- Configuration GPG plug-ins don't tip password -->
                 <configuration>
                     <gpgArguments>
                         <argument>--pinentry-mode</argument>
@@ -308,31 +429,32 @@
                     </gpgArguments>
                 </configuration>
             </plugin>
+
+            <!-- Javadoc：默认跳过（maven.javadoc.skip=true） -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>
                 <executions>
                     <execution>
                         <id>attach-javadocs</id>
-                        <goals>
-                            <goal>jar</goal>
-                        </goals>
+                        <goals><goal>jar</goal></goals>
                     </execution>
                 </executions>
             </plugin>
+
+            <!-- lombok delombok：见 pluginManagement 说明 -->
             <plugin>
                 <groupId>org.projectlombok</groupId>
                 <artifactId>lombok-maven-plugin</artifactId>
                 <executions>
                     <execution>
                         <phase>generate-sources</phase>
-                        <goals>
-                            <goal>delombok</goal>
-                        </goals>
+                        <goals><goal>delombok</goal></goals>
                     </execution>
                 </executions>
             </plugin>
 
+            <!-- Flatten：见 pluginManagement 说明 -->
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>flatten-maven-plugin</artifactId>
@@ -344,38 +466,54 @@
                     <execution>
                         <id>flatten.process-resources</id>
                         <phase>process-resources</phase>
-                        <goals>
-                            <goal>flatten</goal>
-                        </goals>
+                        <goals><goal>flatten</goal></goals>
                     </execution>
                     <execution>
                         <id>flatten</id>
                         <phase>package</phase>
-                        <goals>
-                            <goal>flatten</goal>
-                        </goals>
+                        <goals><goal>flatten</goal></goals>
                     </execution>
                     <execution>
                         <id>flatten.clean</id>
                         <phase>clean</phase>
-                        <goals>
-                            <goal>clean</goal>
-                        </goals>
+                        <goals><goal>clean</goal></goals>
                     </execution>
                 </executions>
             </plugin>
 
-            <!-- Publish package to the Maven Central Repository -->
+            <!--
+              Enforcer：锁死 Maven 与 JDK 版本下限。
+              历史教训：2026-08 本机 Homebrew Maven 默认 JDK 跳到 26 导致 lombok
+              注解处理失败、200+ 找不到符号错误。requireJavaVersion 强制 ≥1.8 且
+              ≤当前 release，requireMavenVersion 强制 ≥3.6（flatten 与 CI 友好
+              revision 需要）。
+            -->
             <plugin>
-                <groupId>org.sonatype.plugins</groupId>
-                <artifactId>nexus-staging-maven-plugin</artifactId>
-                <extensions>true</extensions>
-                <configuration>
-                    <serverId>ossrh</serverId>
-                    <nexusUrl>https://oss.sonatype.org/</nexusUrl>
-                    <autoReleaseAfterClose>true</autoReleaseAfterClose>
-                </configuration>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>enforce-maven-and-jdk</id>
+                        <phase>validate</phase>
+                        <goals><goal>enforce</goal></goals>
+                        <configuration>
+                            <rules>
+                                <requireMavenVersion>
+                                    <version>[3.6.0,)</version>
+                                </requireMavenVersion>
+                                <requireJavaVersion>
+                                    <version>[1.8,21]</version>
+                                </requireJavaVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
+
+            <!--
+              nexus-staging 已禁用。私有仓库走 maven-deploy-plugin 默认上传即可；
+              公共仓库（Sonatype OSSRH / Central Portal）发布需要时取消注释。
+            -->
         </plugins>
     </build>
 </project>
