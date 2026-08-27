@@ -54,15 +54,15 @@
         <!-- ─── (3) 核心三方依赖版本锁定（与 ddd4j-dependencies 同风格：
              <artifactId>.version 属性 + 字母排序，dependencyManagement 统一引用；
              现有版本均通过 JDK 8 兼容性验证，升级前须重跑全量回归） ─── -->
-        <assertj-core.version>3.25.3</assertj-core.version>
+        <assertj-core.version>3.27.3</assertj-core.version>
         <commons-compress.version>1.27.1</commons-compress.version>
-        <commons-csv.version>1.11.0</commons-csv.version>
-        <commons-io.version>2.16.1</commons-io.version>
+        <commons-csv.version>1.14.1</commons-csv.version>
+        <commons-io.version>2.22.0</commons-io.version>
         <ehcache.version>3.9.11</ehcache.version>
-        <fastjson2.version>2.0.51</fastjson2.version>
-        <junit-jupiter.version>5.10.2</junit-jupiter.version>
-        <lombok.version>1.18.32</lombok.version>
-        <logback-classic.version>1.5.6</logback-classic.version>
+        <fastjson2.version>2.0.64</fastjson2.version>
+        <junit-jupiter.version>5.14.4</junit-jupiter.version>
+        <lombok.version>1.18.46</lombok.version>
+        <logback-classic.version>1.5.18</logback-classic.version>
         <poi.version>5.4.1</poi.version>
         <poi-ooxml.version>${poi.version}</poi-ooxml.version>
         <slf4j-api.version>1.7.36</slf4j-api.version>
