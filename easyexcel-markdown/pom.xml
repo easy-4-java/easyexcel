@@ -1,16 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  easyexcel-core：fork 核心模块。
+  easyexcel-markdown：XLSX / XLS / CSV → 多 Sheet Markdown 转换模块。
 
-  本模块在 easyexcel 4.0.3 上游源码上运行，理论上与上游源代码一致；
-  本 pom 仅继承根 pom 的 properties、pluginManagement、依赖管理与 plugin 配置。
-
-  子模块依赖：
-  - easyexcel-support（Spring-core 重打包为 com.alibaba.excel.support 命名空间，
-    隔离下游 Spring 版本冲突）
-  - poi + poi-ooxml（OOXML 读写引擎）
-  - commons-csv（CSV 读写）
-  - ehcache（sharedStrings 缓存）
+  本模块仅依赖 easyexcel-core、POI 全家桶与 commons-csv（轻量、无 web 容器）。
+  测试依赖 JUnit 5 + AssertJ；版本号与覆盖由根 pom dependencyManagement 统一锁定。
 
   见根 pom 注释了解 fork 整体结构与 publish 目标仓库。
 -->
@@ -18,6 +11,7 @@
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
+
     <parent>
         <groupId>io.github.easy4j</groupId>
         <artifactId>easyexcel-parent</artifactId>
@@ -27,17 +21,19 @@
 
     <url>https://github.com/easy-4-java/${project.artifactId}</url>
     <packaging>jar</packaging>
-    <artifactId>easyexcel-core</artifactId>
-    <name>easyexcel-core</name>
+    <artifactId>easyexcel-markdown</artifactId>
+    <name>easyexcel-markdown</name>
+    <description>Convert XLSX / XLS / CSV workbooks to multi-sheet Markdown on top of easyexcel-core</description>
 
     <dependencies>
-        <!-- ===== Fork 自家支持模块 ===== -->
+        <!-- ===== Fork 自家核心 ===== -->
+        <!-- easyexcel-core：easyexcel 读 + SAX API -->
         <dependency>
             <groupId>io.github.easy4j</groupId>
-            <artifactId>easyexcel-support</artifactId>
+            <artifactId>easyexcel-core</artifactId>
         </dependency>
 
-        <!-- ===== POI 套件 ===== -->
+        <!-- ===== POI 套件（OOXML + 共享字符串表 + 图片扫描） ===== -->
         <dependency>
             <groupId>org.apache.poi</groupId>
             <artifactId>poi</artifactId>
@@ -47,14 +43,22 @@
             <artifactId>poi-ooxml</artifactId>
         </dependency>
 
-        <!-- ===== CSV / 缓存 ===== -->
+        <!-- ===== Commons CSV（CSV 路径的两-pass 流式写入） ===== -->
         <dependency>
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-csv</artifactId>
         </dependency>
+
+        <!-- ===== 测试（test scope；版本由根 pom dependencyManagement 锁定） ===== -->
         <dependency>
-            <groupId>org.ehcache</groupId>
-            <artifactId>ehcache</artifactId>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

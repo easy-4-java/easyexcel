@@ -1,27 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  easyexcel-support：Spring-core 重打包支持模块。
+
+  本模块通过 maven-shade-plugin 把 spring-core 的 asm / cglib 重定位到
+  com.alibaba.excel.support 命名空间，避免下游 Spring 5/6 升级冲突。
+
+  Spring-core 版本锁定 5.3.37（最后一个 5.3.x 安全版本），后续 Spring 大版本
+  升级需重新评估 shade 重定位表。
+
+  见根 pom 注释了解 fork 整体结构与 publish 目标仓库。
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>com.alibaba</groupId>
+        <groupId>io.github.easy4j</groupId>
         <artifactId>easyexcel-parent</artifactId>
         <version>${revision}</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
 
-    <url>https://github.com/alibaba/easyexcel</url>
+    <url>https://github.com/easy-4-java/${project.artifactId}</url>
     <packaging>jar</packaging>
     <artifactId>easyexcel-support</artifactId>
     <name>easyexcel-support</name>
 
 
     <dependencies>
+        <!-- ===== Spring-core（被 maven-shade-plugin 重打包到 com.alibaba.excel.support；版本由根 pom 管理） ===== -->
         <dependency>
             <groupId>org.springframework</groupId>
             <artifactId>spring-core</artifactId>
-            <version>5.3.37</version>
             <exclusions>
                 <exclusion>
                     <groupId>*</groupId>

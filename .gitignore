@@ -15,3 +15,9 @@ antx.properties
 output/
 .flattened-pom.xml
 dependency-reduced-pom.xml
+
+# 本地临时暂存目录（曾存放 JDK9+ benchmark 等会话产物）
+/.stash/
+
+# 与本仓库 Java 主线无关的 GitHub Actions 工作流
+/.github/workflows/easyexcel-rust-benchmark.yml
