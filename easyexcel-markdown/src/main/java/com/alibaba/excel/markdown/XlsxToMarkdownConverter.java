@@ -10,6 +10,7 @@ import java.io.InputStreamReader;
 import java.io.PushbackInputStream;
 import java.io.Reader;
 import java.io.Writer;
+import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -48,8 +49,9 @@ import com.alibaba.excel.util.FileUtils;
  * <p>
  * Picture placeholders: XLSX and legacy XLS drawings are scanned so that cells carrying an
  * anchored picture render as {@code [image]}. The {@link InputStream} overloads spool the stream
- * to a temporary file for XLSX/XLS content to enable picture scanning; if you want to avoid disk
- * I/O, use the {@link File} overloads instead (CSV streams are never spooled).
+     * to a temporary file for XLSX/XLS content to enable picture scanning and for CSV content to
+     * enable two-pass column-width detection; if you want to avoid disk I/O, use the {@link File}
+     * overloads instead.
  * <p>
  * Cell style mapping: bold, italic and strikeout fonts are rendered as inline Markdown markers
  * ({@code **bold**}, {@code *italic*}, {@code ~~strike~~}, combined as {@code ~~***mixed***~~}).
@@ -212,8 +214,7 @@ public final class XlsxToMarkdownConverter {
         }
         writeTitle(writer, file.getName());
         if (file.getName().toLowerCase(Locale.ROOT).endsWith(CSV_SUFFIX)) {
-            SheetTable table = loadCsv(file);
-            writer.write(table.toMarkdown());
+            writeCsvStreaming(file, null, baseName(file.getName()), writer);
             writer.write('\n');
         } else {
             writeExcelStreaming(file, null, writer);
@@ -228,7 +229,9 @@ public final class XlsxToMarkdownConverter {
      * document.
      * <p>
      * For XLSX and XLS content the stream is spooled to a temporary file so that picture anchor
-     * scanning is possible. CSV content is read directly from the stream without spooling.
+     * scanning is possible. CSV content is also spooled to a temporary file so that the two-pass
+     * streaming approach (pass 1: determine column count; pass 2: write rows) can re-read the
+     * input without buffering the entire content in memory.
      * <p>
      * The writer is flushed but <em>not</em> closed.
      *
@@ -255,8 +258,7 @@ public final class XlsxToMarkdownConverter {
                 FileUtils.delete(cacheDir);
             }
         } else {
-            SheetTable table = loadCsv(pushback, "CSV");
-            writer.write(table.toMarkdown());
+            writeCsvStreaming(null, pushback, "CSV", writer);
             writer.write('\n');
         }
         writer.flush();
@@ -480,6 +482,127 @@ public final class XlsxToMarkdownConverter {
             }
         }
         promoteFirstRowToHeader(table);
+    }
+
+    /**
+     * Two-pass streaming CSV to Markdown writer.
+     * <p>
+     * Pass 1: stream every record to determine {@code maxColumns} (no row storage).
+     * Pass 2: re-open the CSV and write each Markdown row on the fly.
+     * <p>
+     * When called with an {@link InputStream} (file is {@code null}), the stream is spooled to a
+     * temporary file because two passes require seekable re-reading. The temporary file is deleted
+     * on completion. For the {@link File} path the file is simply re-opened on the second pass.
+     *
+     * @param file           source file, or {@code null} when called from the InputStream path
+     * @param inputStream    the CSV bytes (only used when file is {@code null})
+     * @param sheetName      the sheet/section heading name
+     * @param writer         destination writer, <em>not</em> closed by this method
+     */
+    private static void writeCsvStreaming(File file, InputStream inputStream, String sheetName,
+        Writer writer) throws IOException {
+        // InputStream path: spool to a temporary file so both passes can re-read it.
+        File cacheDir = null;
+        File csvFile = file;
+        if (csvFile == null) {
+            cacheDir = FileUtils.createCacheTmpFile();
+            csvFile = new File(cacheDir, UUID.randomUUID() + ".csv");
+            FileUtils.writeToFile(csvFile, inputStream, false);
+        }
+        try {
+            // --- Pass 1: count max columns (no row storage) ---
+            int maxColumns = countCsvColumns(csvFile);
+
+            // --- Pass 2: write Markdown ---
+            writer.write("## ");
+            writer.write(sheetName == null ? "" : sheetName);
+            writer.write("\n\n");
+
+            if (maxColumns == 0) {
+                writer.write("(empty sheet)\n");
+                return;
+            }
+
+            try (InputStream in = Files.newInputStream(csvFile.toPath())) {
+                BufferedInputStream buffered = new BufferedInputStream(in, CsvDetector.SNIFF_LIMIT);
+                buffered.mark(CsvDetector.SNIFF_LIMIT);
+                byte[] head = new byte[CsvDetector.SNIFF_LIMIT];
+                int headLength = 0;
+                int count;
+                while (headLength < head.length
+                    && (count = buffered.read(head, headLength, head.length - headLength)) != -1) {
+                    headLength += count;
+                }
+                buffered.reset();
+                Charset charset = CsvDetector.detectCharset(head);
+                Reader decoded = new BomStrippingReader(new InputStreamReader(buffered, charset));
+                BufferedReader lineReader = new BufferedReader(decoded, CsvDetector.SNIFF_LIMIT);
+                char delimiter = CsvDetector.detectDelimiter(lineReader);
+                try (CSVParser parser = new CSVParser(lineReader,
+                    CSVFormat.DEFAULT.builder().setDelimiter(delimiter).build())) {
+                    List<String> headerRow = null;
+                    for (CSVRecord record : parser) {
+                        List<String> row = new ArrayList<>();
+                        for (String value : record) {
+                            row.add(value);
+                        }
+                        if (headerRow == null) {
+                            headerRow = row;
+                            StringBuilder hb = new StringBuilder();
+                            SheetTable.appendTableRowStatic(hb, headerRow, maxColumns, null);
+                            SheetTable.appendTableSeparatorStatic(hb, maxColumns, null);
+                            writer.write(hb.toString());
+                        } else {
+                            StringBuilder rb = new StringBuilder();
+                            SheetTable.appendTableRowStatic(rb, row, maxColumns, null);
+                            writer.write(rb.toString());
+                        }
+                    }
+                    if (headerRow == null) {
+                        // File had bytes but CSVParser produced no records
+                        writer.write("(empty sheet)\n");
+                    }
+                }
+            }
+        } finally {
+            if (cacheDir != null) {
+                FileUtils.delete(cacheDir);
+            }
+        }
+    }
+
+    /**
+     * Pass-1 helper: stream every CSV record and return the maximum column count without storing
+     * any rows in memory. Returns 0 when the file is empty or contains no parseable records.
+     */
+    private static int countCsvColumns(File file) throws IOException {
+        int maxColumns = 0;
+        try (InputStream in = Files.newInputStream(file.toPath())) {
+            BufferedInputStream buffered = new BufferedInputStream(in, CsvDetector.SNIFF_LIMIT);
+            buffered.mark(CsvDetector.SNIFF_LIMIT);
+            byte[] head = new byte[CsvDetector.SNIFF_LIMIT];
+            int headLength = 0;
+            int count;
+            while (headLength < head.length
+                && (count = buffered.read(head, headLength, head.length - headLength)) != -1) {
+                headLength += count;
+            }
+            buffered.reset();
+            Charset charset = CsvDetector.detectCharset(head);
+            Reader decoded = new BomStrippingReader(new InputStreamReader(buffered, charset));
+            BufferedReader lineReader = new BufferedReader(decoded, CsvDetector.SNIFF_LIMIT);
+            char delimiter = CsvDetector.detectDelimiter(lineReader);
+            try (CSVParser parser = new CSVParser(lineReader,
+                CSVFormat.DEFAULT.builder().setDelimiter(delimiter).build())) {
+                for (CSVRecord record : parser) {
+                    int size = (int)record.size();
+                    if (size > maxColumns) {
+                        maxColumns = size;
+                    }
+                }
+            }
+        }
+        return maxColumns;
     }
 
     /**

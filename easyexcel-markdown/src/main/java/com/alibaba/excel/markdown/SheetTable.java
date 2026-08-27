@@ -112,17 +112,27 @@ public final class SheetTable {
     }
 
     private void appendTableRow(StringBuilder builder, List<String> row, int columnCount) {
+        appendTableRowStatic(builder, row, columnCount, null);
+    }
+
+    static void appendTableRowStatic(StringBuilder builder, List<String> row, int columnCount,
+        List<String> alignments) {
         builder.append('|');
         for (int columnIndex = 0; columnIndex < columnCount; columnIndex++) {
-            builder.append(' ').append(escape(cellAt(row, columnIndex))).append(" |");
+            builder.append(' ').append(escapeCell(cellAtValue(row, columnIndex))).append(" |");
         }
         builder.append('\n');
     }
 
     private void appendTableSeparator(StringBuilder builder, int columnCount) {
+        appendTableSeparatorStatic(builder, columnCount, columnAlignments);
+    }
+
+    static void appendTableSeparatorStatic(StringBuilder builder, int columnCount, List<String> alignments) {
         builder.append('|');
         for (int columnIndex = 0; columnIndex < columnCount; columnIndex++) {
-            String align = columnIndex < columnAlignments.size() ? columnAlignments.get(columnIndex) : null;
+            String align = alignments != null && columnIndex < alignments.size()
+                ? alignments.get(columnIndex) : null;
             if ("center".equals(align)) {
                 builder.append(" :---: |");
             } else if ("right".equals(align)) {
@@ -135,6 +145,10 @@ public final class SheetTable {
     }
 
     private String cellAt(List<String> row, int columnIndex) {
+        return cellAtValue(row, columnIndex);
+    }
+
+    static String cellAtValue(List<String> row, int columnIndex) {
         if (row == null || columnIndex >= row.size()) {
             return "";
         }
@@ -143,6 +157,10 @@ public final class SheetTable {
     }
 
     private String escape(String value) {
+        return escapeCell(value);
+    }
+
+    static String escapeCell(String value) {
         return value.replace("|", "\\|").replace("\r\n", "\n").replace('\r', '\n').replace("\n", "<br>");
     }
 }
