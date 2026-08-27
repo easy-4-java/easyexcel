@@ -7,8 +7,13 @@ import java.util.List;
  * in GitHub Flavored Markdown: inline font markers (bold / italic / strikeout) and horizontal
  * alignment for column alignment in the delimiter row.
  * <p>
- * Color, border, background and other rich formatting are intentionally absent because GFM
- * tables cannot represent them.
+ * Optional color fields ({@link #fontColorHex}, {@link #backgroundColorHex}) carry explicit RGB
+ * hex values (e.g.&nbsp;{@code #FF0000}) when available. Theme-based colors are not resolved
+ * and remain {@code null}. Colors are only rendered when the HTML color rendering switch is
+ * enabled in {@link XlsxToMarkdownConverter}.
+ * <p>
+ * Border and other rich formatting are intentionally absent because GFM tables cannot
+ * represent them.
  * <p>
  * Rich text support: when a cell contains mixed formatting across runs (e.g. partial bold),
  * the {@link #runs} list carries per-segment style information. When {@code runs} is present
@@ -32,6 +37,19 @@ final class CellStyle {
     String horizontal;
 
     /**
+     * 字体色 RGB hex（格式 {@code #RRGGBB}，大写），无则 {@code null}。
+     * 主题色不解析，返回 {@code null}。
+     */
+    String fontColorHex;
+
+    /**
+     * 背景色 RGB hex（格式 {@code #RRGGBB}，大写），无则 {@code null}。
+     * 仅当 patternType 非 {@code none} 且有显式 rgb 时才解析。
+     * 主题色不解析，返回 {@code null}。
+     */
+    String backgroundColorHex;
+
+    /**
      * Optional rich text run segments. When non-empty, the renderer applies per-segment
      * Markdown wrapping instead of whole-cell wrapping. May be {@code null} for plain cells.
      */
@@ -47,6 +65,9 @@ final class CellStyle {
             return false;
         }
         if (horizontal != null && !HORIZONTAL_GENERAL.equals(horizontal)) {
+            return false;
+        }
+        if (fontColorHex != null || backgroundColorHex != null) {
             return false;
         }
         if (runs != null) {

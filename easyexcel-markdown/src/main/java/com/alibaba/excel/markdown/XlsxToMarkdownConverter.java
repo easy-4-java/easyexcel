@@ -83,6 +83,30 @@ public final class XlsxToMarkdownConverter {
     private static final String CELL_KEY_SEPARATOR = ":";
     private static final int MIN_HEAD_ROWS = 1;
 
+    /** HTML span 开始标签常量。 */
+    private static final String SPAN_STYLE_OPEN = "<span style=\"";
+    /** HTML span 关闭标签常量。 */
+    private static final String SPAN_CLOSE = "</span>";
+    /** CSS color 属性前缀常量。 */
+    private static final String CSS_COLOR = "color:";
+    /** CSS background-color 属性前缀常量。 */
+    private static final String CSS_BG_COLOR = "background-color:";
+
+    /**
+     * HTML 颜色渲染开关。默认 {@code false}，开启后用 {@code <span style="...">} 输出
+     * 字体色和背景色。关闭时输出与旧版本完全一致。
+     */
+    private static boolean htmlColorRendering = false;
+
+    /**
+     * 设置 HTML 颜色渲染开关。
+     *
+     * @param enabled {@code true} 开启颜色渲染，{@code false} 关闭（默认）
+     */
+    public static void setHtmlColorRendering(boolean enabled) {
+        htmlColorRendering = enabled;
+    }
+
     private XlsxToMarkdownConverter() {}
 
     /**
@@ -795,6 +819,10 @@ public final class XlsxToMarkdownConverter {
      * The wrapping order is strike(bold(italic(value))), so bold+italic+strike becomes
      * {@code ~~***value***~~}. Styles are applied on top of any existing rendering (hyperlinks,
      * comments).
+     * <p>
+     * When HTML color rendering is enabled, the final value is wrapped with
+     * {@code <span style="...">} containing font color and/or background color attributes.
+     * HTML special characters in the cell value are escaped before wrapping.
      *
      * @param table
      *            the sheet table
@@ -826,7 +854,13 @@ public final class XlsxToMarkdownConverter {
                 if (value == null || value.isEmpty()) {
                     continue;
                 }
-                row.set(colIndex, wrapWithFontMarkers(value, style));
+                // 1. 先做 Markdown marker 包装（纯 GFM 字符）
+                value = wrapWithFontMarkers(value, style);
+                // 2. HTML 颜色渲染：转义 + 包 span
+                if (htmlColorRendering) {
+                    value = wrapWithColorSpan(value, style);
+                }
+                row.set(colIndex, value);
             }
         }
     }
@@ -909,6 +943,83 @@ public final class XlsxToMarkdownConverter {
             sb.append(segment);
         }
         return sb.toString();
+    }
+
+    // -------------------------------------------------------------------------
+    // HTML 颜色渲染
+    // -------------------------------------------------------------------------
+
+    /**
+     * 将已包装好 Markdown marker 的值用 HTML span 包裹颜色信息。
+     * 顺序：先转义 HTML 敏感字符（保护值内容），再包 span（span 标签本身不受影响）。
+     * <p>
+     * 若 style 无颜色信息，原样返回。
+     */
+    static String wrapWithColorSpan(String value, CellStyle style) {
+        String styleAttr = buildColorStyleAttr(style);
+        if (styleAttr == null) {
+            return value;
+        }
+        // 转义 HTML 敏感字符（发生在 marker 包装之后、span 包装之前）
+        value = escapeHtml(value);
+        return SPAN_STYLE_OPEN + styleAttr + "\">" + value + SPAN_CLOSE;
+    }
+
+    /**
+     * 构建 CSS 颜色样式属性值，如 {@code color:#FF0000;background-color:#FFFF00}。
+     * 仅输出非 null 的颜色，color 在前 background-color 在后。
+     * 若无任何颜色返回 {@code null}。
+     */
+    private static String buildColorStyleAttr(CellStyle style) {
+        boolean hasFont = style.fontColorHex != null;
+        boolean hasBg = style.backgroundColorHex != null;
+        if (!hasFont && !hasBg) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder(48);
+        if (hasFont) {
+            sb.append(CSS_COLOR).append(style.fontColorHex);
+        }
+        if (hasBg) {
+            if (hasFont) {
+                sb.append(';');
+            }
+            sb.append(CSS_BG_COLOR).append(style.backgroundColorHex);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * 转义 HTML 敏感字符：{@code &} → {@code &amp;}，{@code <} → {@code &lt;}，
+     * {@code >} → {@code &gt;}。
+     * 仅在 HTML 颜色渲染开启时调用，防止值内容破坏 span 结构。
+     */
+    private static String escapeHtml(String value) {
+        if (value == null) {
+            return null;
+        }
+        // 先替换 &（避免对已转义的 &amp; 再次转义时产生 &amp;amp;）
+        // 注意：此处只做一次替换，& → &amp; 后不会再被替换
+        StringBuilder sb = null;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c == '&' || c == '<' || c == '>') {
+                if (sb == null) {
+                    sb = new StringBuilder(value.length() + 16);
+                    sb.append(value, 0, i);
+                }
+                if (c == '&') {
+                    sb.append("&amp;");
+                } else if (c == '<') {
+                    sb.append("&lt;");
+                } else {
+                    sb.append("&gt;");
+                }
+            } else if (sb != null) {
+                sb.append(c);
+            }
+        }
+        return sb == null ? value : sb.toString();
     }
 
     /**
