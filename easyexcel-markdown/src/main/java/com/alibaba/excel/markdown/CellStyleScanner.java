@@ -99,12 +99,40 @@ final class CellStyleScanner {
      *             if the file cannot be read
      */
     static Map<Integer, Map<String, CellStyle>> scanStyles(File file) throws IOException {
-        Map<Integer, Map<String, CellStyle>> result = new HashMap<>(16);
         OPCPackage pkg = null;
         try {
             pkg = OPCPackage.open(file, PackageAccess.READ);
             XSSFReader reader = new XSSFReader(pkg);
+            return scanStyles(reader);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Scan cell styles failure", e);
+        } finally {
+            if (pkg != null) {
+                try {
+                    pkg.close();
+                } catch (IOException e) {
+                    // closing a read only package best effort
+                }
+            }
+        }
+    }
 
+    /**
+     * Scan XLSX cell styles using an already-opened {@link XSSFReader}.
+     * This overload allows the caller to share a single {@link OPCPackage} opening
+     * across multiple scanners.
+     *
+     * @param reader
+     *            an already-opened XSSFReader (caller retains ownership)
+     * @return per-sheet map of {@code "row:col"} to non-plain {@link CellStyle}, never {@code null}
+     * @throws IOException
+     *             if the styles or sheet data cannot be read
+     */
+    static Map<Integer, Map<String, CellStyle>> scanStyles(XSSFReader reader) throws IOException {
+        Map<Integer, Map<String, CellStyle>> result = new HashMap<>(16);
+        try {
             // 1. Parse styles.xml to build font and cellXfs lookup lists.
             List<FontFlags> fonts;
             List<Integer> fontIds;
@@ -148,14 +176,6 @@ final class CellStyleScanner {
             throw e;
         } catch (Exception e) {
             throw new IOException("Scan cell styles failure", e);
-        } finally {
-            if (pkg != null) {
-                try {
-                    pkg.close();
-                } catch (IOException e) {
-                    // closing a read only package best effort
-                }
-            }
         }
         return result;
     }

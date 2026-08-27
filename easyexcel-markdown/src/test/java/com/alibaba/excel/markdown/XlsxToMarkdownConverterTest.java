@@ -14,6 +14,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import java.io.StringReader;
+
 import org.apache.poi.hssf.usermodel.HSSFWorkbook;
 import org.apache.poi.ss.usermodel.Row;
 import org.apache.poi.ss.usermodel.Sheet;
@@ -199,6 +201,74 @@ public class XlsxToMarkdownConverterTest {
         assertThat(XlsxToMarkdownConverter.toMarkdown(file))
             .contains("| a\\|b |")
             .contains("| line1<br>line2 |");
+    }
+
+    @Test
+    public void csvRejectsHeadRowNumberGreaterThanOne() throws IOException {
+        File file = writeCsv("h1,h2\nv1,v2\n");
+
+        assertThatThrownBy(() -> XlsxToMarkdownConverter.toStructured(file, 2))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("headRowNumber > 1 is only supported for Excel files")
+            .hasMessageContaining("sample.csv");
+    }
+
+    @Test
+    public void csvAcceptsHeadRowNumberOne() throws IOException {
+        File file = writeCsv("h1,h2\nv1,v2\n");
+
+        SheetDocument document = XlsxToMarkdownConverter.toStructured(file, 1);
+
+        assertThat(document.sheets).hasSize(1);
+        assertThat(document.sheets.get(0).headers).containsExactly(Arrays.asList("h1", "h2"));
+        assertThat(document.sheets.get(0).rows).containsExactly(Arrays.asList("v1", "v2"));
+    }
+
+    @Test
+    public void bomStrippingReaderSingleCharRead() throws IOException {
+        String input = "\uFEFFhello";
+        XlsxToMarkdownConverter.BomStrippingReader reader =
+            new XlsxToMarkdownConverter.BomStrippingReader(new StringReader(input));
+
+        StringBuilder sb = new StringBuilder();
+        int c;
+        while ((c = reader.read()) != -1) {
+            sb.append((char) c);
+        }
+        reader.close();
+
+        assertThat(sb.toString()).isEqualTo("hello");
+        assertThat(sb.toString()).doesNotContain("\uFEFF");
+    }
+
+    @Test
+    public void bomStrippingReaderSingleCharReadNoBom() throws IOException {
+        String input = "hello";
+        XlsxToMarkdownConverter.BomStrippingReader reader =
+            new XlsxToMarkdownConverter.BomStrippingReader(new StringReader(input));
+
+        StringBuilder sb = new StringBuilder();
+        int c;
+        while ((c = reader.read()) != -1) {
+            sb.append((char) c);
+        }
+        reader.close();
+
+        assertThat(sb.toString()).isEqualTo("hello");
+    }
+
+    @Test
+    public void bomStrippingReaderBulkReadStillWorks() throws IOException {
+        String input = "\uFEFFhello";
+        XlsxToMarkdownConverter.BomStrippingReader reader =
+            new XlsxToMarkdownConverter.BomStrippingReader(new StringReader(input));
+
+        char[] buf = new char[32];
+        int count = reader.read(buf, 0, buf.length);
+        reader.close();
+
+        assertThat(count).isEqualTo(5);
+        assertThat(new String(buf, 0, count)).isEqualTo("hello");
     }
 
     @Test

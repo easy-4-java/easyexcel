@@ -62,15 +62,49 @@ final class DrawingAnchorScanner {
     /**
      * Scan XLSX (ZIP-based) drawing anchors in a streaming fashion.
      *
+     * @param file
+     *            an XLSX file (ZIP-based)
      * @return sheet index to the set of {@code rowIndex:columnIndex} anchor cells that carry a
      *         picture, never {@code null}
+     * @throws IOException
+     *             if the file cannot be read
      */
     static Map<Integer, Set<String>> scanPictureAnchors(File file) throws IOException {
-        Map<Integer, Set<String>> anchors = new HashMap<>(16);
         OPCPackage pkg = null;
         try {
             pkg = OPCPackage.open(file, PackageAccess.READ);
             XSSFReader reader = new XSSFReader(pkg);
+            return scanPictureAnchors(reader);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("Scan picture anchors failure", e);
+        } finally {
+            if (pkg != null) {
+                try {
+                    pkg.close();
+                } catch (IOException e) {
+                    // closing a read only package best effort, nothing left to clean up
+                }
+            }
+        }
+    }
+
+    /**
+     * Scan XLSX drawing anchors using an already-opened {@link XSSFReader}.
+     * This overload allows the caller to share a single {@link OPCPackage} opening
+     * across multiple scanners.
+     *
+     * @param reader
+     *            an already-opened XSSFReader (caller retains ownership)
+     * @return sheet index to the set of {@code rowIndex:columnIndex} anchor cells that carry a
+     *         picture, never {@code null}
+     * @throws IOException
+     *             if the drawing parts cannot be read
+     */
+    static Map<Integer, Set<String>> scanPictureAnchors(XSSFReader reader) throws IOException {
+        Map<Integer, Set<String>> anchors = new HashMap<>(16);
+        try {
             XSSFReader.SheetIterator sheets = (XSSFReader.SheetIterator)reader.getSheetsData();
             int sheetIndex = 0;
             while (sheets.hasNext()) {
@@ -89,14 +123,6 @@ final class DrawingAnchorScanner {
             throw e;
         } catch (Exception e) {
             throw new IOException("Scan picture anchors failure", e);
-        } finally {
-            if (pkg != null) {
-                try {
-                    pkg.close();
-                } catch (IOException e) {
-                    // closing a read only package best effort, nothing left to clean up
-                }
-            }
         }
         return anchors;
     }

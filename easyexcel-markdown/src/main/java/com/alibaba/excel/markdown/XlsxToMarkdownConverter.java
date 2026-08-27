@@ -13,7 +13,6 @@ import java.io.Writer;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -26,6 +25,10 @@ import java.util.UUID;
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVParser;
 import org.apache.commons.csv.CSVRecord;
+
+import org.apache.poi.openxml4j.opc.OPCPackage;
+import org.apache.poi.openxml4j.opc.PackageAccess;
+import org.apache.poi.xssf.eventusermodel.XSSFReader;
 
 import com.alibaba.excel.EasyExcel;
 import com.alibaba.excel.ExcelReader;
@@ -112,11 +115,11 @@ public final class XlsxToMarkdownConverter {
      * @param file
      *            an XLSX, XLS or CSV file
      * @param headRowNumber
-     *            number of rows to use as header rows (&ge; 1); CSV always uses a single header
-     *            row regardless of this parameter
+     *            number of rows to use as header rows (&ge; 1)
      * @return the structured document, never {@code null}
      * @throws IllegalArgumentException
-     *             if {@code headRowNumber} is less than 1
+     *             if {@code headRowNumber} is less than 1, or if {@code headRowNumber > 1} and
+     *             the file is a CSV file (multi-row headers are only supported for Excel files)
      */
     public static SheetDocument toStructured(File file, int headRowNumber) {
         Objects.requireNonNull(file, "file must not be null");
@@ -127,9 +130,14 @@ public final class XlsxToMarkdownConverter {
         if (!file.isFile()) {
             throw new ExcelAnalysisException("File not found: " + file.getAbsolutePath());
         }
+        boolean isCsv = file.getName().toLowerCase(Locale.ROOT).endsWith(CSV_SUFFIX);
+        if (isCsv && headRowNumber > MIN_HEAD_ROWS) {
+            throw new IllegalArgumentException(
+                "headRowNumber > 1 is only supported for Excel files, got CSV: " + file.getName());
+        }
         SheetDocument document = new SheetDocument();
         document.title = file.getName();
-        if (file.getName().toLowerCase(Locale.ROOT).endsWith(CSV_SUFFIX)) {
+        if (isCsv) {
             document.sheets.add(loadCsv(file));
         } else {
             document.sheets.addAll(loadExcel(file, null, headRowNumber));
@@ -280,8 +288,9 @@ public final class XlsxToMarkdownConverter {
      * discard it from memory before reading the next sheet.
      */
     private static void writeExcelStreaming(File file, InputStream inputStream, Writer writer) throws IOException {
-        Map<Integer, Set<String>> pictureAnchors = scanAnchors(file);
-        Map<Integer, Map<String, CellStyle>> cellStyles = scanCellStyles(file);
+        Map<Integer, Set<String>> pictureAnchors = new HashMap<>(16);
+        Map<Integer, Map<String, CellStyle>> cellStyles = new HashMap<>(16);
+        scanFileMetadata(file, pictureAnchors, cellStyles);
         final Map<Integer, SheetTable> sheetMap = new TreeMap<>();
         final Map<Integer, List<int[]>> mergeMap = new HashMap<>(16);
         final Map<Integer, Map<String, String>> hyperlinkMap = new HashMap<>(16);
@@ -320,6 +329,10 @@ public final class XlsxToMarkdownConverter {
                 mergeMap.remove(sheetNo);
                 hyperlinkMap.remove(sheetNo);
                 commentMap.remove(sheetNo);
+                // pictureAnchors 和 cellStyles 的 key 也是 0-based sheet index，
+                // 与 sheetNo 语义一致，同样按 sheet 清理以释放内存。
+                pictureAnchors.remove(sheetNo);
+                cellStyles.remove(sheetNo);
             }
         }
     }
@@ -334,8 +347,9 @@ public final class XlsxToMarkdownConverter {
         final Map<Integer, List<int[]>> mergeMap = new HashMap<>(16);
         final Map<Integer, Map<String, String>> hyperlinkMap = new HashMap<>(16);
         final Map<Integer, Map<String, String>> commentMap = new HashMap<>(16);
-        Map<Integer, Set<String>> pictureAnchors = scanAnchors(file);
-        Map<Integer, Map<String, CellStyle>> cellStyles = scanCellStyles(file);
+        Map<Integer, Set<String>> pictureAnchors = new HashMap<>(16);
+        Map<Integer, Map<String, CellStyle>> cellStyles = new HashMap<>(16);
+        scanFileMetadata(file, pictureAnchors, cellStyles);
         ExcelReaderBuilder builder = file != null ? EasyExcel.read(file) : EasyExcel.read(inputStream);
         try (ExcelReader reader = builder.headRowNumber(0)
             .ignoreEmptyRow(false)
@@ -371,41 +385,59 @@ public final class XlsxToMarkdownConverter {
     }
 
     /**
-     * Scan cell styles from the given file. XLSX (ZIP) files use the streaming SAX scanner over
-     * styles.xml and sheet XML; legacy XLS (OLE2) files use the full HSSFWorkbook enumeration.
-     * Returns an empty map when {@code file} is {@code null} (InputStream-only path without
-     * spooling).
+     * Scan both picture anchors and cell styles from the given file in a single pass.
+     * For XLSX (ZIP) files, opens {@link OPCPackage} once and shares the {@link XSSFReader}
+     * between the two scanners, avoiding redundant package openings. The package is closed
+     * before this method returns so that downstream readers (e.g. EasyExcel) can open their
+     * own copy without conflict.
+     * <p>
+     * For legacy XLS (OLE2) files, the two scanners are called independently (each loads the
+     * workbook into memory, acceptable given XLS row/column limits).
+     * <p>
+     * When {@code file} is {@code null}, both output maps are left empty.
+     *
+     * @param file
+     *            the workbook file, or {@code null}
+     * @param anchorsOut
+     *            output map for picture anchors (populated in-place)
+     * @param stylesOut
+     *            output map for cell styles (populated in-place)
      */
-    private static Map<Integer, Map<String, CellStyle>> scanCellStyles(File file) {
+    private static void scanFileMetadata(File file,
+        Map<Integer, Set<String>> anchorsOut,
+        Map<Integer, Map<String, CellStyle>> stylesOut) {
         if (file == null) {
-            return Collections.emptyMap();
+            return;
         }
         try {
             if (isZipFile(file)) {
-                return CellStyleScanner.scanStyles(file);
+                // XLSX: 打开一次 OPCPackage，把同一个 XSSFReader 传给两个扫描器
+                OPCPackage pkg = null;
+                try {
+                    pkg = OPCPackage.open(file, PackageAccess.READ);
+                    XSSFReader reader = new XSSFReader(pkg);
+                    anchorsOut.putAll(DrawingAnchorScanner.scanPictureAnchors(reader));
+                    stylesOut.putAll(CellStyleScanner.scanStyles(reader));
+                } catch (IOException e) {
+                    throw e;
+                } finally {
+                    if (pkg != null) {
+                        try {
+                            pkg.close();
+                        } catch (IOException e) {
+                            // closing a read only package best effort
+                        }
+                    }
+                }
+            } else {
+                // Legacy XLS
+                anchorsOut.putAll(DrawingAnchorScanner.scanLegacyPictureAnchors(file));
+                stylesOut.putAll(CellStyleScanner.scanLegacyStyles(file));
             }
-            return CellStyleScanner.scanLegacyStyles(file);
         } catch (IOException e) {
-            throw new ExcelAnalysisException("Read cell styles failure", e);
-        }
-    }
-
-    /**
-     * Scan picture anchors from the given file. XLSX (ZIP) files use the streaming SAX scanner,
-     * legacy XLS (OLE2) files use the full HSSFWorkbook enumeration. Returns an empty map when
-     * {@code file} is {@code null} (InputStream-only path without spooling).
-     */
-    private static Map<Integer, Set<String>> scanAnchors(File file) {
-        if (file == null) {
-            return Collections.emptyMap();
-        }
-        try {
-            if (isZipFile(file)) {
-                return DrawingAnchorScanner.scanPictureAnchors(file);
-            }
-            return DrawingAnchorScanner.scanLegacyPictureAnchors(file);
-        } catch (IOException e) {
-            throw new ExcelAnalysisException("Read picture anchors failure", e);
+            throw new ExcelAnalysisException("Read metadata failure", e);
+        } catch (Exception e) {
+            throw new ExcelAnalysisException("Read metadata failure", e);
         }
     }
 
@@ -952,12 +984,26 @@ public final class XlsxToMarkdownConverter {
 
     /**
      * Reader wrapper that drops a single leading UTF-8 byte order mark.
+     * Both single-char {@link #read()} and bulk {@link #read(char[], int, int)} paths
+     * are handled so that the BOM is never leaked to the caller regardless of read pattern.
      */
-    private static final class BomStrippingReader extends FilterReader {
+    static final class BomStrippingReader extends FilterReader {
         private boolean first = true;
 
         BomStrippingReader(Reader delegate) {
             super(delegate);
+        }
+
+        @Override
+        public int read() throws IOException {
+            int c = super.read();
+            if (first) {
+                first = false;
+                if (c == UTF8_BOM) {
+                    c = super.read();
+                }
+            }
+            return c;
         }
 
         @Override
@@ -970,7 +1016,9 @@ public final class XlsxToMarkdownConverter {
                     count = super.read(cbuf, off, len);
                 }
             }
-            first = false;
+            if (count > 0) {
+                first = false;
+            }
             return count;
         }
     }
